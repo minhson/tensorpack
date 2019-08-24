@@ -23,11 +23,12 @@ def get_dorefa(bitW, bitA, bitG):
             return x
 
         if bitW == 1:   # BWN
-            E = tf.stop_gradient(tf.reduce_mean(tf.abs(x)))
+            #FIXMEE = tf.stop_gradient(tf.reduce_mean(tf.abs(x)))
 
             @tf.custom_gradient
             def _sign(x):
-                return tf.where(tf.equal(x, 0), tf.ones_like(x), tf.sign(x / E)) * E, lambda dy: dy
+                #FIXMEreturn tf.where(tf.equal(x, 0), tf.ones_like(x), tf.sign(x / E)) * E, lambda dy: dy
+                return tf.where(tf.equal(x, 0), tf.ones_like(x), tf.sign(x)), lambda dy: dy
 
             return _sign(x)
 
@@ -38,7 +39,14 @@ def get_dorefa(bitW, bitA, bitG):
     def fa(x):
         if bitA == 32:
             return x
-        return quantize(x, bitA)
+        #FIXMEreturn quantize(x, bitA)
+        elif bitA == 1:
+            @tf.custom_gradient
+            def _sign_a(x):
+                return tf.where(tf.equal(x, 0), tf.ones_like(x), tf.sign(x)), lambda dy: dy
+            return _sign_a(x)
+        else:
+            return quantize(x, bitA)
 
     def fg(x):
         if bitG == 32:

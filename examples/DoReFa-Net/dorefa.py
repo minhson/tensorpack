@@ -24,7 +24,6 @@ def get_dorefa(bitW, bitA, bitG):
 
         if bitW == 1:   # BWN
             #FIXMEE = tf.stop_gradient(tf.reduce_mean(tf.abs(x)))
-
             @tf.custom_gradient
             def _sign(x):
                 #FIXMEreturn tf.where(tf.equal(x, 0), tf.ones_like(x), tf.sign(x / E)) * E, lambda dy: dy

@@ -59,7 +59,8 @@ class Model(ModelDesc):
         def nonlin(x):
             if BITA == 32:
                 return tf.nn.relu(x)
-            return tf.clip_by_value(x, 0.0, 1.0)
+            #FIXMEreturn tf.clip_by_value(x, 0.0, 1.0)
+            return tf.clip_by_value(x, -1.0, 1.0)
 
         def activate(x):
             return fa(nonlin(x))

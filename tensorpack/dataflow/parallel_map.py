@@ -9,14 +9,14 @@ import zmq
 from six.moves import queue
 
 from ..utils.concurrency import StoppableThread, enable_death_signal
-from ..utils.serialize import dumps, loads
-from ..utils.develop import log_deprecated
+from ..utils.serialize import dumps_once as dumps, loads_once as loads
 from .base import DataFlow, DataFlowReentrantGuard, ProxyDataFlow
-from .common import RepeatedData
+from .common import RepeatedData, BatchData
 from .parallel import _bind_guard, _get_pipe_name, _MultiProcessZMQDataFlow, _repeat_iter, _zmq_catch_error
 
 __all__ = ['MultiThreadMapData',
-           'MultiProcessMapData', 'MultiProcessMapDataZMQ']
+           'MultiProcessMapData', 'MultiProcessMapDataZMQ',
+           'MultiProcessMapAndBatchData', 'MultiProcessMapAndBatchDataZMQ']
 
 
 class _ParallelMapData(ProxyDataFlow):
@@ -84,11 +84,9 @@ class _ParallelMapData(ProxyDataFlow):
 
     def __iter__(self):
         if self._strict:
-            for dp in self.get_data_strict():
-                yield dp
+            yield from self.get_data_strict()
         else:
-            for dp in self.get_data_non_strict():
-                yield dp
+            yield from self.get_data_non_strict()
 
 
 class MultiThreadMapData(_ParallelMapData):
@@ -144,7 +142,7 @@ class MultiThreadMapData(_ParallelMapData):
             finally:
                 self.stop()
 
-    def __init__(self, ds, num_thread=None, map_func=None, buffer_size=200, strict=False, nr_thread=None):
+    def __init__(self, ds, num_thread=None, map_func=None, *, buffer_size=200, strict=False):
         """
         Args:
             ds (DataFlow): the dataflow to map
@@ -153,12 +151,7 @@ class MultiThreadMapData(_ParallelMapData):
                 discard/skip the datapoint.
             buffer_size (int): number of datapoints in the buffer
             strict (bool): use "strict mode", see notes above.
-            nr_thread: deprecated name
         """
-        if nr_thread is not None:
-            log_deprecated("MultiThreadMapData(nr_thread)", "Renamed to 'num_thread'", "2020-01-01")
-            num_thread = nr_thread
-
         if strict:
             # In strict mode, buffer size cannot be larger than the total number of datapoints
             try:
@@ -204,8 +197,7 @@ class MultiThreadMapData(_ParallelMapData):
 
     def __iter__(self):
         with self._guard:
-            for dp in super(MultiThreadMapData, self).__iter__():
-                yield dp
+            yield from super(MultiThreadMapData, self).__iter__()
 
     def __del__(self):
         if self._evt is not None:
@@ -257,7 +249,7 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
                 dp = self.map_func(dp)
                 socket.send(dumps(dp), copy=False)
 
-    def __init__(self, ds, num_proc=None, map_func=None, buffer_size=200, strict=False, nr_proc=None):
+    def __init__(self, ds, num_proc=None, map_func=None, *, buffer_size=200, strict=False):
         """
         Args:
             ds (DataFlow): the dataflow to map
@@ -266,11 +258,7 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
                 discard/skip the datapoint.
             buffer_size (int): number of datapoints in the buffer
             strict (bool): use "strict mode", see notes above.
-            nr_proc: deprecated name
         """
-        if nr_proc is not None:
-            log_deprecated("MultiProcessMapDataZMQ(nr_proc)", "Renamed to 'num_proc'", "2020-01-01")
-            num_proc = nr_proc
         if strict:
             # In strict mode, buffer size cannot be larger than the total number of datapoints
             try:
@@ -286,6 +274,9 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
         self._strict = strict
         self._procs = []
 
+    def _create_worker(self, id, pipename, hwm):
+        return MultiProcessMapDataZMQ._Worker(id, self.map_func, pipename, hwm)
+
     def reset_state(self):
         _MultiProcessZMQDataFlow.reset_state(self)
         _ParallelMapData.reset_state(self)
@@ -299,9 +290,8 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
 
         self._proc_ids = [u'{}'.format(k).encode('utf-8') for k in range(self.num_proc)]
         worker_hwm = int(self._buffer_size * 2 // self.num_proc)
-        self._procs = [MultiProcessMapDataZMQ._Worker(
-            self._proc_ids[k], self.map_func, pipename, worker_hwm)
-            for k in range(self.num_proc)]
+        self._procs = [self._create_worker(self._proc_ids[k], pipename, worker_hwm)
+                       for k in range(self.num_proc)]
 
         self._start_processes()
         self._fill_buffer()     # pre-fill the bufer
@@ -316,12 +306,124 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
         return dp
 
     def __iter__(self):
-        with self._guard, _zmq_catch_error('MultiProcessMapData'):
-            for dp in super(MultiProcessMapDataZMQ, self).__iter__():
-                yield dp
+        with self._guard, _zmq_catch_error(type(self).__name__):
+            yield from super(MultiProcessMapDataZMQ, self).__iter__()
 
 
-MultiProcessMapData = MultiProcessMapDataZMQ  # alias
+class MultiProcessMapAndBatchDataZMQ(_MultiProcessZMQDataFlow):
+    """
+    Similar to :class:`MultiProcessMapDataZMQ`, except that this DataFlow
+    also does batching in parallel in the worker processes.
+    Therefore it can be helpful if you wish to hide the latency of batching.
+
+    When `nr_proc==1`, the behavior of this class is identical to
+    `BatchData(MapData(ds, map_func), batch_size)`.
+
+    When `nr_proc>1`, the datapoints may be grouped in arbitrary order,
+    or grouped with datapoints from a different pass of the given dataflow.
+    """
+
+    class _Dispatcher(mp.Process):
+        def __init__(self, ds, pipename, hwm):
+            super(MultiProcessMapAndBatchDataZMQ._Dispatcher, self).__init__()
+            self.ds = RepeatedData(ds, -1)
+            self.pipename = pipename
+            self.hwm = hwm
+
+        def run(self):
+            enable_death_signal()
+            ctx = zmq.Context()
+            socket = ctx.socket(zmq.PUSH)
+            socket.set_hwm(self.hwm)
+            socket.bind(self.pipename)
+            self.ds.reset_state()
+            for dp in self.ds:
+                socket.send(dumps(dp), copy=False)
+
+    class _Worker(mp.Process):
+        def __init__(self, identity, map_func, input_pipe, result_pipe, hwm, batch_size):
+            super(MultiProcessMapAndBatchDataZMQ._Worker, self).__init__()
+            self.identity = identity
+            self.map_func = map_func
+            self.input_pipe = input_pipe
+            self.result_pipe = result_pipe
+            self.hwm = hwm
+            self.batch_size = batch_size
+
+        def run(self):
+            enable_death_signal(_warn=self.identity == b'0')
+            ctx = zmq.Context()
+
+            # recv jobs
+            socket = ctx.socket(zmq.PULL)
+            socket.setsockopt(zmq.IDENTITY, self.identity)
+            socket.set_hwm(self.hwm * self.batch_size)
+            socket.connect(self.input_pipe)
+
+            # send results
+            out_socket = ctx.socket(zmq.PUSH)
+            out_socket.set_hwm(max(self.hwm, 5))
+            out_socket.connect(self.result_pipe)
+
+            batch = []
+            while True:
+                dp = loads(socket.recv(copy=False))
+                dp = self.map_func(dp)
+                if dp is not None:
+                    batch.append(dp)
+                    if len(batch) == self.batch_size:
+                        dp = BatchData.aggregate_batch(batch)
+                        out_socket.send(dumps(dp), copy=False)
+                        del batch[:]
+
+    def __init__(self, ds, num_proc, map_func, batch_size, buffer_size=None):
+        """
+        Args:
+            ds (DataFlow): the dataflow to map
+            num_proc(int): number of threads to use
+            map_func (callable): datapoint -> datapoint | None. Return None to
+                discard/skip the datapoint.
+            batch_size (int): batch size
+            buffer_size (int): number of datapoints (not batched) in the buffer.
+                Defaults to batch_size * 10
+        """
+        super(MultiProcessMapAndBatchDataZMQ, self).__init__()
+        assert batch_size < buffer_size
+        self.ds = ds
+        self.num_proc = num_proc
+        self.map_func = map_func
+        self.batch_size = batch_size
+        if buffer_size is None:
+            buffer_size = batch_size * 10
+        self.buffer_size = buffer_size
+
+    def reset_state(self):
+        _MultiProcessZMQDataFlow.reset_state(self)
+        self._guard = DataFlowReentrantGuard()
+
+        job_pipe = _get_pipe_name("dataflow_MaB_job")
+        result_pipe = _get_pipe_name("dataflow_MaB_result")
+
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.PULL)
+        self.socket.set_hwm(max(5, self.buffer_size // self.batch_size))
+        _bind_guard(self.socket, result_pipe)
+
+        dispatcher = MultiProcessMapAndBatchDataZMQ._Dispatcher(self.ds, job_pipe, self.buffer_size)
+
+        self._proc_ids = [u'{}'.format(k).encode('utf-8') for k in range(self.num_proc)]
+        worker_hwm = max(3, self.buffer_size // self.num_proc // self.batch_size)
+        self._procs = [MultiProcessMapAndBatchDataZMQ._Worker(
+            self._proc_ids[k], self.map_func, job_pipe, result_pipe, worker_hwm, self.batch_size)
+            for k in range(self.num_proc)]
+
+        self._procs.append(dispatcher)
+        self._start_processes()
+
+    def __iter__(self):
+        with self._guard, _zmq_catch_error(type(self).__name__):
+            while True:
+                yield loads(self.socket.recv(copy=False))
 
 
 def _pool_map(data):
@@ -412,6 +514,11 @@ class MultiProcessMapDataComponentSharedArray(DataFlow):
                     dp = dps[index]
                     dp[self.index] = arr.copy()
                     yield dp
+
+
+# alias
+MultiProcessMapData = MultiProcessMapDataZMQ
+MultiProcessMapAndBatchData = MultiProcessMapAndBatchDataZMQ
 
 
 if __name__ == '__main__':

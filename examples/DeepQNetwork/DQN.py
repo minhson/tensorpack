@@ -20,13 +20,12 @@ from expreplay import ExpReplay
 BATCH_SIZE = 64
 IMAGE_SIZE = (84, 84)
 FRAME_HISTORY = 4
-UPDATE_FREQ = 4
+UPDATE_FREQ = 4  # the number of new state transitions per parameter update (per training step)
 
 MEMORY_SIZE = 1e6
 # will consume at least 1e6 * 84 * 84 bytes == 6.6G memory.
 INIT_MEMORY_SIZE = MEMORY_SIZE // 20
-STEPS_PER_EPOCH = 100000 // UPDATE_FREQ  # each epoch is 100k played frames
-EVAL_EPISODE = 50
+STEPS_PER_EPOCH = 100000 // UPDATE_FREQ  # each epoch is 100k state transitions
 NUM_PARALLEL_PLAYERS = 3
 
 USE_GYM = False
@@ -43,10 +42,9 @@ def resize_keepdims(im, size):
 
 def get_player(viz=False, train=False):
     if USE_GYM:
-        env = gym.make(ENV_NAME)
+        env = gym.make(ENV_NAME, render_mode='human' if viz else None)
     else:
         from atari import AtariPlayer
-        # frame_skip=4 is what's used in the original paper
         env = AtariPlayer(ENV_NAME, frame_skip=4, viz=viz,
                           live_lost_as_eoe=train, max_num_frames=60000)
     env = FireResetEnv(env)
@@ -127,21 +125,20 @@ def get_config(model):
             ModelSaver(),
             PeriodicTrigger(
                 RunOp(DQNModel.update_target_param, verbose=True),
-                every_k_steps=10000 // UPDATE_FREQ),    # update target network every 10k steps
+                every_k_steps=5000),    # update target network every 5k steps
             expreplay,
             ScheduledHyperParamSetter('learning_rate',
-                                      [(0, 1e-3), (60, 4e-4), (100, 2e-4), (500, 5e-5)]),
+                                      [(0, 1e-3), (60, 5e-4), (400, 1e-4)]),
             ScheduledHyperParamSetter(
                 ObjAttrParam(expreplay, 'exploration'),
-                [(0, 1), (10, 0.1), (320, 0.01)],   # 1->0.1 in the first million steps
+                [(0, 1), (10, 0.1), (400, 0.01)],   # 1->0.1 in the first million steps
                 interp='linear'),
             PeriodicTrigger(Evaluator(
-                EVAL_EPISODE, ['state'], ['Qvalue'], get_player),
+                args.num_eval, ['state'], ['Qvalue'], get_player),
                 every_k_epochs=5 if 'pong' in args.env.lower() else 10),  # eval more frequently for easy games
-            HumanHyperParamSetter('learning_rate'),
         ],
         steps_per_epoch=STEPS_PER_EPOCH,
-        max_epoch=800,
+        max_epoch=500,  # a total of 50M state transition
     )
 
 
@@ -155,6 +152,7 @@ if __name__ == '__main__':
                         help='either an atari rom file (that ends with .bin) or a gym atari environment name')
     parser.add_argument('--algo', help='algorithm',
                         choices=['DQN', 'Double', 'Dueling'], default='Double')
+    parser.add_argument('--num-eval', default=50, type=int)
     args = parser.parse_args()
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -173,18 +171,17 @@ if __name__ == '__main__':
         assert args.load is not None
         pred = OfflinePredictor(PredictConfig(
             model=model,
-            session_init=get_model_loader(args.load),
+            session_init=SmartInit(args.load),
             input_names=['state'],
             output_names=['Qvalue']))
         if args.task == 'play':
             play_n_episodes(get_player(viz=0.01), pred, 100, render=True)
         elif args.task == 'eval':
-            eval_model_multithread(pred, EVAL_EPISODE, get_player)
+            eval_model_multithread(pred, args.num_eval, get_player)
     else:
         logger.set_logger_dir(
             os.path.join('train_log', 'DQN-{}'.format(
                 os.path.basename(args.env).split('.')[0])))
         config = get_config(model)
-        if args.load:
-            config.session_init = get_model_loader(args.load)
+        config.session_init = SmartInit(args.load)
         launch_train_with_config(config, SimpleTrainer())

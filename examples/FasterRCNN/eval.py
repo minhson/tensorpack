@@ -6,7 +6,6 @@ import json
 import numpy as np
 import os
 import sys
-import tensorflow as tf
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -17,13 +16,13 @@ from scipy import interpolate
 
 from tensorpack.callbacks import Callback
 from tensorpack.tfutils.common import get_tf_version_tuple
-from tensorpack.utils import logger
-from tensorpack.utils.utils import get_tqdm
+from tensorpack.utils import logger, get_tqdm
 
 from common import CustomResize, clip_boxes
 from config import config as cfg
 from data import get_eval_dataflow
 from dataset import DatasetRegistry
+from tensorpack.compat import tfv1
 
 try:
     import horovod.tensorflow as hvd
@@ -70,7 +69,7 @@ def _paste_mask(box, mask, shape):
     """
     assert mask.shape[0] == mask.shape[1], mask.shape
 
-    if True:
+    if cfg.MRCNN.ACCURATE_PASTE:
         # This method is accurate but much slower.
         mask = np.pad(mask, [(1, 1), (1, 1)], mode='constant')
         box = _scale_box(box, float(mask.shape[0]) / (mask.shape[0] - 2))
@@ -82,6 +81,7 @@ def _paste_mask(box, mask, shape):
         xs = np.arange(0.0, w) + 0.5
         ys = (ys - box[1]) / (box[3] - box[1]) * mask.shape[0]
         xs = (xs - box[0]) / (box[2] - box[0]) * mask.shape[1]
+        # Waste a lot of compute since most indices are out-of-border
         res = mask_continuous(xs, ys)
         return (res >= 0.5).astype('uint8')
     else:
@@ -124,12 +124,12 @@ def predict_image(img, model_func):
     resized_img = resizer.augment(img)
     scale = np.sqrt(resized_img.shape[0] * 1.0 / img.shape[0] * resized_img.shape[1] / img.shape[1])
     boxes, probs, labels, *masks = model_func(resized_img)
+
+    # Some slow numpy postprocessing:
     boxes = boxes / scale
     # boxes are already clipped inside the graph, but after the floating point scaling, this may not be true any more.
     boxes = clip_boxes(boxes, orig_shape)
-
     if masks:
-        # has mask
         full_masks = [_paste_mask(box, mask, orig_shape)
                       for box, mask in zip(boxes, masks[0])]
         masks = full_masks
@@ -200,7 +200,7 @@ def multithread_predict_dataflow(dataflows, model_funcs):
         return predict_dataflow(dataflows[0], model_funcs[0])
     kwargs = {'thread_name_prefix': 'EvalWorker'} if sys.version_info.minor >= 6 else {}
     with ThreadPoolExecutor(max_workers=num_worker, **kwargs) as executor, \
-            tqdm.tqdm(total=sum([df.size() for df in dataflows])) as pbar:
+            tqdm.tqdm(total=sum(df.size() for df in dataflows)) as pbar:
         futures = []
         for dataflow, pred in zip(dataflows, model_funcs):
             futures.append(executor.submit(predict_dataflow, dataflow, pred, pbar))
@@ -243,7 +243,7 @@ class EvalCallback(Callback):
                 self.dataflow = get_eval_dataflow(self._eval_dataset,
                                                   shard=hvd.local_rank(), num_shards=hvd.local_size())
 
-            self.barrier = hvd.allreduce(tf.random_normal(shape=[1]))
+            self.barrier = hvd.allreduce(tfv1.random_normal(shape=[1]))
 
     def _build_predictor(self, idx):
         return self.trainer.get_predictor(self._in_names, self._out_names, device=idx)
@@ -282,11 +282,7 @@ class EvalCallback(Callback):
                 all_results.extend(obj)
                 os.unlink(fname)
 
-        output_file = os.path.join(
-            logdir, '{}-outputs{}.json'.format(self._eval_dataset, self.global_step))
-
-        scores = DatasetRegistry.get(self._eval_dataset).eval_inference_results(
-            all_results, output_file)
+        scores = DatasetRegistry.get(self._eval_dataset).eval_inference_results(all_results)
         for k, v in scores.items():
             self.trainer.monitors.put_scalar(self._eval_dataset + '-' + k, v)
 

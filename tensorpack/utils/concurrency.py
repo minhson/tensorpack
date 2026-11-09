@@ -14,20 +14,15 @@ import weakref
 from contextlib import contextmanager
 import six
 from six.moves import queue
+import subprocess
 
 from . import logger
 from .argtools import log_once
 
-if six.PY2:
-    import subprocess32 as subprocess
-else:
-    import subprocess
-
 
 __all__ = ['StoppableThread', 'LoopThread', 'ShareSessionThread',
            'ensure_proc_terminate',
-           'OrderedResultGatherProc', 'OrderedContainer', 'DIE',
-           'mask_sigint', 'start_proc_mask_signal']
+           'start_proc_mask_signal']
 
 
 class StoppableThread(threading.Thread):
@@ -236,10 +231,11 @@ def start_proc_mask_signal(proc):
         for p in proc:
             if isinstance(p, mp.Process):
                 if sys.version_info < (3, 4) or mp.get_start_method() == 'fork':
-                    log_once(
-"Starting a process with 'fork' method is not safe and may consume unnecessary extra memory."
-" Use 'forkserver/spawn' method (available after Py3.4) instead if you run into any issues. "
-"See https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods",
+                    log_once("""
+Starting a process with 'fork' method is efficient but not safe and may cause deadlock or crash.
+Use 'forkserver' or 'spawn' method instead if you run into such issues.
+See https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods on how to set them.
+""".replace("\n", ""),
 'warn')  # noqa
             p.start()
 
@@ -262,8 +258,11 @@ def subproc_call(cmd, timeout=None):
         return output, 0
     except subprocess.TimeoutExpired as e:
         logger.warn("Command '{}' timeout!".format(cmd))
-        logger.warn(e.output.decode('utf-8'))
-        return e.output, -1
+        if e.output:
+            logger.warn(e.output.decode('utf-8'))
+            return e.output, -1
+        else:
+            return "", -1
     except subprocess.CalledProcessError as e:
         logger.warn("Command '{}' failed, return code={}".format(cmd, e.returncode))
         logger.warn(e.output.decode('utf-8'))

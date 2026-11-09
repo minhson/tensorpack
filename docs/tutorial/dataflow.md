@@ -21,14 +21,14 @@ You can simply use DataFlow as a data processing pipeline and plug it into your 
 ### Load Raw Data
 We do not make any assumptions about your data format.
 You would usually want to write the source DataFlow (`MyDataFlow` in the example below) for your own data format.
-See [another tutorial](extend/dataflow.html) for simple instructions on writing a DataFlow.
+See [another tutorial](extend/dataflow.md) for simple instructions on writing a DataFlow.
 
 ### Assemble the Pipeline
 There are a lot of existing DataFlow utilities in tensorpack, which you can use to assemble
 the source DataFlow with complex data pipeline.
-A common pipeline usually would 
-__read from disk (or other sources), 
-apply transformations, 
+A common pipeline usually would
+__read from disk (or other sources),
+apply transformations,
 group into batches, prefetch data__, etc, and all __run in parallel__.
 A simple DataFlow pipeline is like the following:
 
@@ -43,26 +43,26 @@ df = BatchData(df, 128)
 df = MultiProcessRunnerZMQ(df, 3)
 ````
 
-A list of built-in DataFlow to use can be found at [API docs](../modules/dataflow.html).
-You can also find complicated real-life DataFlow pipelines in the [ImageNet training script](../examples/ImageNetModels/imagenet_utils.py)
+A list of built-in DataFlow to use can be found at [API docs](../modules/dataflow).
+You can also find complicated real-life DataFlow pipelines in the [ImageNet training script](../../examples/ImageNetModels/imagenet_utils.py)
 or other tensorpack examples.
 
 ### Parallelize the Pipeline
 
-DataFlow includes carefully optimized parallel runners and parallel mappers: `Multi{Thread,Process}{Runner,MapData}`.
+DataFlow includes **carefully optimized** parallel runners and parallel mappers: `Multi{Thread,Process}{Runner,MapData}`.
 Runners execute multiple clones of a dataflow in parallel.
 Mappers execute a mapping function in parallel on top of an existing dataflow.
-You can find details in the [API docs](../modules/dataflow.html) under the
+You can find details in the [API docs](../modules/dataflow) under the
 "parallel" and "parallel_map" section.
 
-The [Efficient DataFlow](efficient-dataflow.html) give a deeper dive
+[Parallel DataFlow tutorial](parallel-dataflow.md) gives a deeper dive
 on how to use them to optimize your data pipeline.
 
 ### Run the DataFlow
 
 When training with tensorpack, typically it is the `InputSource` interface that runs the DataFlow.
 
-When using DataFlow alone without other tensorpack components,
+When using DataFlow alone without tensorpack,
 you need to call `reset_state()` first to initialize it,
 and then use the generator however you like:
 
@@ -76,6 +76,7 @@ for dp in df:
 
 ### Why DataFlow?
 
-It's **easy and fast***. For more discussions, see [Why DataFlow?](/tutorial/philosophy/dataflow.html)
+It's **easy and fast**.
+For more discussions, see [Why DataFlow?](./philosophy/dataflow.md)
 Nevertheless, using DataFlow is not required in tensorpack.
 Tensorpack supports data loading with native TF operators / TF datasets as well.

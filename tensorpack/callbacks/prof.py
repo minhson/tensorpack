@@ -8,7 +8,6 @@ import os
 import time
 import tensorflow as tf
 from six.moves import map, queue
-from tensorflow.python.client import timeline
 import psutil
 
 from ..tfutils.common import gpu_available_in_session
@@ -38,26 +37,41 @@ class GPUUtilizationTracker(Callback):
     def __init__(self, devices=None):
         """
         Args:
-            devices (list[int]): physical GPU ids. If None, will use CUDA_VISIBLE_DEVICES
+            devices (list[int]): physical GPU ids to monitor. If None, will guess from the environment.
         """
         assert os.name != 'nt', "GPUUtilizationTracker does not support windows!"
-        if devices is None:
-            env = os.environ.get('CUDA_VISIBLE_DEVICES')
-            if env is None:
-                self._devices = list(range(get_num_gpu()))
-                if len(self._devices) > 1:
-                    logger.warn("[GPUUtilizationTracker] Both devices and CUDA_VISIBLE_DEVICES are None! "
-                                "Will monitor all {} visible GPUs!".format(len(self._devices)))
-            else:
-                if len(env):
-                    self._devices = list(map(int, env.split(',')))
-                else:
-                    self._devices = []
+        self._devices = devices
+        self._enabled = True
+
+    def _guess_devices(self):
+        env = os.environ.get('CUDA_VISIBLE_DEVICES')
+        if env is None:
+            devices = list(range(get_num_gpu()))
+            if len(devices) > 1:
+                logger.warn("[GPUUtilizationTracker] Both devices and CUDA_VISIBLE_DEVICES are None! "
+                            "Will monitor all {} visible GPUs!".format(len(devices)))
         else:
-            self._devices = devices
-        assert len(self._devices), "[GPUUtilizationTracker] No GPU device given!"
+            if len(env):
+                devices = list(map(int, env.split(',')))
+            else:
+                devices = []
+        return devices
 
     def _setup_graph(self):
+        # special heuristics for Horovod
+        from ..train import HorovodTrainer
+        if isinstance(self.trainer, HorovodTrainer):
+            if self.trainer.mpi_enabled():
+                logger.warn("GPUUtilizationTracker is disabled under MPI.")
+                self._enabled = False
+                return
+            else:
+                self._devices = [self.trainer.hvd.local_rank()]
+
+        if self._devices is None:
+            self._devices = self._guess_devices()
+        assert len(self._devices), "[GPUUtilizationTracker] No GPU device given!"
+
         self._evt = mp.Event()
         self._stop_evt = mp.Event()
         self._queue = mp.Queue()
@@ -70,16 +84,20 @@ class GPUUtilizationTracker(Callback):
         assert gpu_available_in_session(), "[GPUUtilizationTracker] needs GPU!"
 
     def _before_epoch(self):
-        self._evt.set()
+        if self._enabled:
+            self._evt.set()
 
     def _after_epoch(self):
-        while self._evt.is_set():   # unlikely, unless the epoch is extremely fast
-            pass
-        self._evt.set()
+        if self._enabled:
+            while self._evt.is_set():   # unlikely, unless the epoch is extremely fast
+                pass
+            self._evt.set()
 
     def _trigger_epoch(self):
         # Don't do this in after_epoch because
         # before,after_epoch are supposed to be extremely fast by design.
+        if not self._enabled:
+            return
         try:
             stats = self._queue.get(timeout=60)
         except queue.Empty:
@@ -95,9 +113,10 @@ class GPUUtilizationTracker(Callback):
             self.trainer.monitors.put_scalar('GPUUtil/{}'.format(dev), stats[idx])
 
     def _after_train(self):
-        self._stop_evt.set()
-        self._evt.set()
-        self._proc.terminate()
+        if self._enabled:
+            self._stop_evt.set()
+            self._evt.set()
+            self._proc.terminate()
 
     @staticmethod
     def worker(evt, rst_queue, stop_evt, devices):
@@ -105,10 +124,10 @@ class GPUUtilizationTracker(Callback):
         Args:
             devices (list[int])
         """
-        with NVMLContext() as ctx:
-            devices = [ctx.device(i) for i in devices]
-            while True:
-                try:
+        try:
+            with NVMLContext() as ctx:
+                devices = [ctx.device(i) for i in devices]
+                while True:
                     evt.wait()  # start epoch
                     evt.clear()
                     if stop_evt.is_set():   # or on exit
@@ -127,17 +146,17 @@ class GPUUtilizationTracker(Callback):
                         if evt.is_set():    # stop epoch
                             if stop_evt.is_set():   # or on exit
                                 return
-                            evt.clear()
                             if cnt > 1:
                                 # Ignore the last datapoint. Usually is zero, makes us underestimate the util.
                                 stats -= data
                                 cnt -= 1
                             rst_queue.put(stats / cnt)
+                            evt.clear()
                             break
-                except Exception:
-                    logger.exception("Exception in GPUUtilizationTracker.worker")
-                    rst_queue.put(-1)
-                    return
+        except Exception:
+            logger.exception("Exception in GPUUtilizationTracker.worker")
+            rst_queue.put(-1)
+            return
 
 
 # Can add more features from tfprof
@@ -200,6 +219,7 @@ class GraphProfiler(Callback):
             f.write(metadata.SerializeToString())
 
     def _write_tracing(self, metadata):
+        from tensorflow.python.client import timeline
         tl = timeline.Timeline(step_stats=metadata.step_stats)
         fname = os.path.join(
             self._dir, 'chrome-trace-{}.json'.format(self.global_step))
@@ -224,7 +244,7 @@ class GPUMemoryTracker(Callback):
 
     _chief_only = False
 
-    def __init__(self, devices=[0]):
+    def __init__(self, devices=(0,)):
         """
         Args:
             devices([int] or [str]): list of GPU devices to track memory on.
@@ -232,9 +252,15 @@ class GPUMemoryTracker(Callback):
         assert isinstance(devices, (list, tuple)), devices
         devices = ['/gpu:{}'.format(x) if isinstance(x, int) else x for x in devices]
         self._devices = devices
+        self._disabled = False
 
     def _setup_graph(self):
-        from tensorflow.contrib.memory_stats import MaxBytesInUse
+        try:
+            from tensorflow.contrib.memory_stats import MaxBytesInUse
+        except ImportError:
+            logger.warning("GPUMemoryTracker is not available in TF2.")
+            self._disabled = True
+            return
         ops = []
         for dev in self._devices:
             with tf.device(dev):
@@ -242,10 +268,12 @@ class GPUMemoryTracker(Callback):
         self._fetches = tf.train.SessionRunArgs(fetches=ops)
 
     def _before_train(self):
-        assert gpu_available_in_session(), "PeakMemoryTracker only supports GPU!"
+        if not gpu_available_in_session():
+            self._disabled = True
+            logger.warning("GPUMemoryTracker only supports GPU!")
 
     def _before_run(self, _):
-        if self.local_step == self.trainer.steps_per_epoch - 1:
+        if not self._disabled and self.local_step == self.trainer.steps_per_epoch - 1:
             return self._fetches
         return None
 

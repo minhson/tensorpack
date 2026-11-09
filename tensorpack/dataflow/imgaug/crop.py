@@ -7,10 +7,11 @@ import cv2
 from ...utils.argtools import shape2d
 from ...utils.develop import log_deprecated
 from .base import ImageAugmentor, ImagePlaceholder
-from .transform import CropTransform, TransformList, ResizeTransform
+from .transform import CropTransform, TransformList, ResizeTransform, PhotometricTransform
 from .misc import ResizeShortestEdge
 
-__all__ = ['RandomCrop', 'CenterCrop', 'RandomCropRandomShape', 'GoogleNetRandomCropAndResize']
+__all__ = ['RandomCrop', 'CenterCrop', 'RandomCropRandomShape',
+           'GoogleNetRandomCropAndResize', 'RandomCutout']
 
 
 class RandomCrop(ImageAugmentor):
@@ -19,9 +20,10 @@ class RandomCrop(ImageAugmentor):
     def __init__(self, crop_shape):
         """
         Args:
-            crop_shape: (h, w) tuple or a int
+            crop_shape: (h, w), int or a tuple of int
         """
         crop_shape = shape2d(crop_shape)
+        crop_shape = (int(crop_shape[0]), int(crop_shape[1]))
         super(RandomCrop, self).__init__()
         self._init(locals())
 
@@ -30,9 +32,9 @@ class RandomCrop(ImageAugmentor):
         assert orig_shape[0] >= self.crop_shape[0] \
             and orig_shape[1] >= self.crop_shape[1], orig_shape
         diffh = orig_shape[0] - self.crop_shape[0]
-        h0 = 0 if diffh == 0 else self.rng.randint(diffh)
+        h0 = self.rng.randint(diffh + 1)
         diffw = orig_shape[1] - self.crop_shape[1]
-        w0 = 0 if diffw == 0 else self.rng.randint(diffw)
+        w0 = self.rng.randint(diffw + 1)
         return CropTransform(h0, w0, self.crop_shape[0], self.crop_shape[1])
 
 
@@ -121,13 +123,54 @@ class GoogleNetRandomCropAndResize(ImageAugmentor):
             if self.rng.uniform() < 0.5:
                 ww, hh = hh, ww
             if hh <= h and ww <= w:
-                x1 = 0 if w == ww else self.rng.randint(0, w - ww)
-                y1 = 0 if h == hh else self.rng.randint(0, h - hh)
+                x1 = self.rng.randint(0, w - ww + 1)
+                y1 = self.rng.randint(0, h - hh + 1)
                 return TransformList([
                     CropTransform(y1, x1, hh, ww),
                     ResizeTransform(hh, ww, self.target_shape, self.target_shape, interp=self.interp)
                 ])
-        tfm1 = ResizeShortestEdge(self.target_shape, interp=self.interp).get_transform(img)
-        out_shape = (tfm1.new_h, tfm1.new_w)
-        tfm2 = CenterCrop(self.target_shape).get_transform(ImagePlaceholder(shape=out_shape))
-        return TransformList([tfm1, tfm2])
+        resize = ResizeShortestEdge(self.target_shape, interp=self.interp).get_transform(img)
+        out_shape = (resize.new_h, resize.new_w)
+        crop = CenterCrop(self.target_shape).get_transform(ImagePlaceholder(shape=out_shape))
+        return TransformList([resize, crop])
+
+
+class RandomCutout(ImageAugmentor):
+    """
+    The cutout augmentation, as described in https://arxiv.org/abs/1708.04552
+    """
+    def __init__(self, h_range, w_range, fill=0.):
+        """
+        Args:
+            h_range (int or tuple): the height of rectangle to cut.
+                If a tuple, will randomly sample from this range [low, high)
+            w_range (int or tuple): similar to above
+            fill (float): the fill value
+        """
+        super(RandomCutout, self).__init__()
+        self._init(locals())
+
+    def _get_cutout_shape(self):
+        if isinstance(self.h_range, int):
+            h = self.h_range
+        else:
+            h = self.rng.randint(self.h_range)
+
+        if isinstance(self.w_range, int):
+            w = self.w_range
+        else:
+            w = self.rng.randint(self.w_range)
+        return h, w
+
+    @staticmethod
+    def _cutout(img, y0, x0, h, w, fill):
+        img[y0:y0 + h, x0:x0 + w] = fill
+        return img
+
+    def get_transform(self, img):
+        h, w = self._get_cutout_shape()
+        x0 = self.rng.randint(0, img.shape[1] + 1 - w)
+        y0 = self.rng.randint(0, img.shape[0] + 1 - h)
+        return PhotometricTransform(
+            lambda img: RandomCutout._cutout(img, y0, x0, h, w, self.fill),
+            "cutout")

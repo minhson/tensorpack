@@ -4,6 +4,7 @@ import itertools
 import numpy as np
 import tensorflow as tf
 
+from tensorpack import tfv1
 from tensorpack.models import Conv2D, FixedUnPooling, MaxPooling, layer_register
 from tensorpack.tfutils.argscope import argscope
 from tensorpack.tfutils.scope_utils import under_name_scope
@@ -33,21 +34,22 @@ def fpn_model(features):
     use_gn = cfg.FPN.NORM == 'GN'
 
     def upsample2x(name, x):
-        return FixedUnPooling(
-            name, x, 2, unpool_mat=np.ones((2, 2), dtype='float32'),
-            data_format='channels_first')
-
-        # tf.image.resize is, again, not aligned.
-        # with tf.name_scope(name):
-        #     shape2d = tf.shape(x)[2:]
-        #     x = tf.transpose(x, [0, 2, 3, 1])
-        #     x = tf.image.resize_nearest_neighbor(x, shape2d * 2, align_corners=True)
-        #     x = tf.transpose(x, [0, 3, 1, 2])
-        #     return x
+        try:
+            resize = tf.compat.v2.image.resize_images
+            with tf.name_scope(name):
+                shp2d = tf.shape(x)[2:]
+                x = tf.transpose(x, [0, 2, 3, 1])
+                x = resize(x, shp2d * 2, 'nearest')
+                x = tf.transpose(x, [0, 3, 1, 2])
+                return x
+        except AttributeError:
+            return FixedUnPooling(
+                name, x, 2, unpool_mat=np.ones((2, 2), dtype='float32'),
+                data_format='channels_first')
 
     with argscope(Conv2D, data_format='channels_first',
                   activation=tf.identity, use_bias=True,
-                  kernel_initializer=tf.variance_scaling_initializer(scale=1.)):
+                  kernel_initializer=tfv1.variance_scaling_initializer(scale=1.)):
         lat_2345 = [Conv2D('lateral_1x1_c{}'.format(i + 2), c, num_channel, 1)
                     for i, c in enumerate(features)]
         if use_gn:
@@ -83,7 +85,7 @@ def fpn_map_rois_to_levels(boxes):
     """
     sqrtarea = tf.sqrt(tf_area(boxes))
     level = tf.cast(tf.floor(
-        4 + tf.log(sqrtarea * (1. / 224) + 1e-6) * (1.0 / np.log(2))), tf.int32)
+        4 + tf.math.log(sqrtarea * (1. / 224) + 1e-6) * (1.0 / np.log(2))), tf.int32)
 
     # RoI levels range from 2~5 (not 6)
     level_ids = [
@@ -126,8 +128,8 @@ def multilevel_roi_align(features, rcnn_boxes, resolution):
     all_rois = tf.concat(all_rois, axis=0)  # NCHW
     # Unshuffle to the original order, to match the original samples
     level_id_perm = tf.concat(level_ids, axis=0)  # A permutation of 1~N
-    level_id_invert_perm = tf.invert_permutation(level_id_perm)
-    all_rois = tf.gather(all_rois, level_id_invert_perm)
+    level_id_invert_perm = tf.math.invert_permutation(level_id_perm)
+    all_rois = tf.gather(all_rois, level_id_invert_perm, name="output")
     return all_rois
 
 
@@ -201,7 +203,7 @@ def generate_fpn_proposals(
         # Detectron picks top-k within the batch, rather than within an image. However we do not have a batch.
         proposal_topk = tf.minimum(tf.size(proposal_scores), fpn_nms_topk)
         proposal_scores, topk_indices = tf.nn.top_k(proposal_scores, k=proposal_topk, sorted=False)
-        proposal_boxes = tf.gather(proposal_boxes, topk_indices)
+        proposal_boxes = tf.gather(proposal_boxes, topk_indices, name="all_proposals")
     else:
         for lvl in range(num_lvl):
             with tf.name_scope('Lvl{}'.format(lvl + 2)):

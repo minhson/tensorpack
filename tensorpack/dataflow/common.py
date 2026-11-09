@@ -9,13 +9,16 @@ from collections import defaultdict, deque
 from copy import copy
 import six
 import tqdm
-from six.moves import map, range
 from termcolor import colored
 
 from ..utils import logger
 from ..utils.utils import get_rng, get_tqdm, get_tqdm_kwargs
-from ..utils.develop import log_deprecated
 from .base import DataFlow, DataFlowReentrantGuard, ProxyDataFlow, RNGDataFlow
+
+try:
+    from collections.abc import Mapping
+except ImportError:
+    from collections import Mapping
 
 __all__ = ['TestDataSpeed', 'PrintData', 'BatchData', 'BatchDataByShape', 'FixedSizeData', 'MapData',
            'MapDataComponent', 'RepeatedData', 'RepeatedDataPoint', 'RandomChooseData',
@@ -35,18 +38,23 @@ class TestDataSpeed(ProxyDataFlow):
         super(TestDataSpeed, self).__init__(ds)
         self.test_size = int(size)
         self.warmup = int(warmup)
+        self._reset_called = False
+
+    def reset_state(self):
+        self._reset_called = True
+        super(TestDataSpeed, self).reset_state()
 
     def __iter__(self):
         """ Will run testing at the beginning, then produce data normally. """
         self.start()
-        for dp in self.ds:
-            yield dp
+        yield from self.ds
 
     def start(self):
         """
         Start testing with a progress bar.
         """
-        self.ds.reset_state()
+        if not self._reset_called:
+            self.ds.reset_state()
         itr = self.ds.__iter__()
         if self.warmup:
             for _ in tqdm.trange(self.warmup, **get_tqdm_kwargs()):
@@ -91,6 +99,7 @@ class BatchData(ProxyDataFlow):
             except NotImplementedError:
                 pass
         self.batch_size = int(batch_size)
+        assert self.batch_size > 0
         self.remainder = remainder
         self.use_list = use_list
 
@@ -111,10 +120,10 @@ class BatchData(ProxyDataFlow):
         for data in self.ds:
             holder.append(data)
             if len(holder) == self.batch_size:
-                yield BatchData._aggregate_batch(holder, self.use_list)
+                yield BatchData.aggregate_batch(holder, self.use_list)
                 del holder[:]
         if self.remainder and len(holder) > 0:
-            yield BatchData._aggregate_batch(holder, self.use_list)
+            yield BatchData.aggregate_batch(holder, self.use_list)
 
     @staticmethod
     def _batch_numpy(data_list):
@@ -146,7 +155,19 @@ class BatchData(ProxyDataFlow):
                 pass
 
     @staticmethod
-    def _aggregate_batch(data_holder, use_list=False):
+    def aggregate_batch(data_holder, use_list=False):
+        """
+        Aggregate a list of datapoints to one batched datapoint.
+
+        Args:
+            data_holder (list[dp]): each dp is either a list or a dict.
+            use_list (bool): whether to batch data into a list or a numpy array.
+
+        Returns:
+            dp:
+                either a list or a dict, depend on the inputs.
+                Each item is a batched version of the corresponding inputs.
+        """
         first_dp = data_holder[0]
         if isinstance(first_dp, (list, tuple)):
             result = []
@@ -164,6 +185,8 @@ class BatchData(ProxyDataFlow):
                     result[key] = data_list
                 else:
                     result[key] = BatchData._batch_numpy(data_list)
+        else:
+            raise ValueError("Data point has to be list/tuple/dict. Got {}".format(type(first_dp)))
         return result
 
 
@@ -202,7 +225,7 @@ class BatchDataByShape(BatchData):
                 holder = self.holder[shp]
                 holder.append(dp)
                 if len(holder) == self.batch_size:
-                    yield BatchData._aggregate_batch(holder)
+                    yield BatchData.aggregate_batch(holder)
                     del holder[:]
 
 
@@ -363,12 +386,10 @@ class RepeatedData(ProxyDataFlow):
     def __iter__(self):
         if self.num == -1:
             while True:
-                for dp in self.ds:
-                    yield dp
+                yield from self.ds
         else:
             for _ in range(self.num):
-                for dp in self.ds:
-                    yield dp
+                yield from self.ds
 
 
 class RepeatedDataPoint(ProxyDataFlow):
@@ -410,7 +431,7 @@ class RandomChooseData(RNGDataFlow):
         """
         super(RandomChooseData, self).__init__()
         if isinstance(df_lists[0], (tuple, list)):
-            assert sum([v[1] for v in df_lists]) == 1.0
+            assert sum(v[1] for v in df_lists) == 1.0
             self.df_lists = df_lists
         else:
             prob = 1.0 / len(df_lists)
@@ -463,8 +484,7 @@ class RandomMixData(RNGDataFlow):
         sums = np.cumsum(self.sizes)
         idxs = np.arange(self.__len__())
         self.rng.shuffle(idxs)
-        idxs = np.array(list(map(
-            lambda x: np.searchsorted(sums, x, 'right'), idxs)))
+        idxs = np.array([np.searchsorted(sums, x, 'right') for x in idxs])
         itrs = [k.__iter__() for k in self.df_lists]
         assert idxs.max() == len(itrs) - 1, "{}!={}".format(idxs.max(), len(itrs) - 1)
         for k in idxs:
@@ -491,12 +511,11 @@ class ConcatData(DataFlow):
             d.reset_state()
 
     def __len__(self):
-        return sum([len(x) for x in self.df_lists])
+        return sum(len(x) for x in self.df_lists)
 
     def __iter__(self):
         for d in self.df_lists:
-            for dp in d.__iter__():
-                yield dp
+            yield from d
 
 
 class JoinData(DataFlow):
@@ -545,7 +564,7 @@ class JoinData(DataFlow):
         """
         Return the minimum size among all.
         """
-        return min([len(k) for k in self.df_lists])
+        return min(len(k) for k in self.df_lists)
 
     def __iter__(self):
         itrs = [k.__iter__() for k in self.df_lists]
@@ -602,7 +621,7 @@ class LocallyShuffleData(ProxyDataFlow, RNGDataFlow):
         because it does not make sense to stop the iteration anywhere.
     """
 
-    def __init__(self, ds, buffer_size, num_reuse=1, shuffle_interval=None, nr_reuse=None):
+    def __init__(self, ds, buffer_size, num_reuse=1, shuffle_interval=None):
         """
         Args:
             ds (DataFlow): input DataFlow.
@@ -613,11 +632,7 @@ class LocallyShuffleData(ProxyDataFlow, RNGDataFlow):
                 datapoints were produced from the given dataflow. Frequent shuffle on large buffer
                 may affect speed, but infrequent shuffle may not provide enough randomness.
                 Defaults to buffer_size / 3
-            nr_reuse: deprecated name for num_reuse
         """
-        if nr_reuse is not None:
-            log_deprecated("LocallyShuffleData(nr_reuse=...)", "Renamed to 'num_reuse'.", "2020-01-01")
-            num_reuse = nr_reuse
         ProxyDataFlow.__init__(self, ds)
         self.q = deque(maxlen=buffer_size)
         if shuffle_interval is None:
@@ -678,8 +693,7 @@ class CacheData(ProxyDataFlow):
             if len(self.buffer):
                 if self.shuffle:
                     self.rng.shuffle(self.buffer)
-                for dp in self.buffer:
-                    yield dp
+                yield from self.buffer
             else:
                 for dp in self.ds:
                     yield dp
@@ -748,7 +762,7 @@ class PrintData(ProxyDataFlow):
         Gather useful debug information from a datapoint.
 
         Args:
-            entry: the datapoint component
+            entry: the datapoint component, either a list or a dict
             k (int): index of this component in current datapoint
             depth (int, optional): recursion depth
             max_depth, max_list: same as in :meth:`__init__`.
@@ -779,7 +793,7 @@ class PrintData(ProxyDataFlow):
                     self.range = " in range [{}, {}]".format(el.min(), el.max())
                 elif type(el) in numpy_scalar_types:
                     self.range = " with value {}".format(el)
-                elif isinstance(el, (list)):
+                elif isinstance(el, (list, tuple)):
                     self.shape = " of len {}".format(len(el))
 
                     if depth < max_depth:
@@ -805,9 +819,15 @@ class PrintData(ProxyDataFlow):
         return str(_elementInfo(entry, k, depth, max_list))
 
     def _get_msg(self, dp):
-        msg = [u"datapoint %i<%i with %i components consists of" % (self.cnt, self.num, len(dp))]
+        msg = [colored(u"datapoint %i/%i with %i components consists of" %
+               (self.cnt, self.num, len(dp)), "cyan")]
+        is_dict = isinstance(dp, Mapping)
         for k, entry in enumerate(dp):
-            msg.append(self._analyze_input_data(entry, k, max_depth=self.max_depth, max_list=self.max_list))
+            if is_dict:
+                key, value = entry, dp[entry]
+            else:
+                key, value = k, entry
+            msg.append(self._analyze_input_data(value, key, max_depth=self.max_depth, max_list=self.max_list))
         return u'\n'.join(msg)
 
     def __iter__(self):
@@ -815,7 +835,7 @@ class PrintData(ProxyDataFlow):
             # it is important to place this here! otherwise it mixes the output of multiple PrintData
             if self.cnt == 0:
                 label = ' (%s)' % self.name if self.name is not None else ""
-                logger.info(colored("DataFlow Info%s:" % label, 'cyan'))
+                logger.info(colored("Contents of DataFlow%s:" % label, 'cyan'))
 
             if self.cnt < self.num:
                 print(self._get_msg(dp))

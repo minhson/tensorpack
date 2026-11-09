@@ -8,18 +8,15 @@ import threading
 import cv2
 import gym
 import six
-from ale_python_interface import ALEInterface
+from ale_py import ALEInterface, Action, LoggerMode
 from gym import spaces
-from gym.envs.atari.atari_env import ACTION_MEANING
-from six.moves import range
 
-from tensorpack.utils import logger
+from tensorpack.utils import logger, execute_only_once, get_rng
 from tensorpack.utils.fs import get_dataset_path
-from tensorpack.utils.utils import execute_only_once, get_rng
 
 __all__ = ['AtariPlayer']
 
-ROM_URL = "https://github.com/openai/atari-py/tree/master/atari_py/atari_roms"
+ROM_URL = "https://github.com/openai/atari-py/tree/gdb/atari_py/atari_roms"
 _ALE_LOCK = threading.Lock()
 
 
@@ -34,7 +31,8 @@ class AtariPlayer(gym.Env):
 
     def __init__(self, rom_file, viz=0,
                  frame_skip=4, nullop_start=30,
-                 live_lost_as_eoe=True, max_num_frames=0):
+                 live_lost_as_eoe=True, max_num_frames=0,
+                 grayscale=True):
         """
         Args:
             rom_file: path to the rom
@@ -46,15 +44,16 @@ class AtariPlayer(gym.Env):
             nullop_start: start with random number of null ops.
             live_losts_as_eoe: consider lost of lives as end of episode. Useful for training.
             max_num_frames: maximum number of frames per episode.
+            grayscale (bool): if True, return 2D image. Otherwise return HWC image.
         """
         super(AtariPlayer, self).__init__()
         if not os.path.isfile(rom_file) and '/' not in rom_file:
             rom_file = get_dataset_path('atari_rom', rom_file)
         assert os.path.isfile(rom_file), \
-            "rom {} not found. Please download at {}".format(rom_file, ROM_URL)
+            "ROM {} not found. Please download at {}".format(rom_file, ROM_URL)
 
         try:
-            ALEInterface.setLoggerMode(ALEInterface.Logger.Error)
+            ALEInterface.setLoggerMode(LoggerMode.Error)
         except AttributeError:
             if execute_only_once():
                 logger.warn("You're not using latest ALE")
@@ -65,7 +64,6 @@ class AtariPlayer(gym.Env):
             self.rng = get_rng(self)
             self.ale.setInt(b"random_seed", self.rng.randint(0, 30000))
             self.ale.setInt(b"max_num_frames_per_episode", max_num_frames)
-            self.ale.setBool(b"showinfo", False)
 
             self.ale.setInt(b"frame_skip", 1)
             self.ale.setBool(b'color_averaging', False)
@@ -93,12 +91,18 @@ class AtariPlayer(gym.Env):
         self.nullop_start = nullop_start
 
         self.action_space = spaces.Discrete(len(self.actions))
+        self.grayscale = grayscale
+        shape = (self.height, self.width) if grayscale else (self.height, self.width, 3)
         self.observation_space = spaces.Box(
-            low=0, high=255, shape=(self.height, self.width), dtype=np.uint8)
+            low=0, high=255, shape=shape, dtype=np.uint8)
         self._restart_episode()
 
     def get_action_meanings(self):
-        return [ACTION_MEANING[i] for i in self.actions]
+        keys = Action.__members__.values()
+        values = Action.__members__.keys()
+        mapping = dict(zip(keys, values))
+        return [mapping[action] for action in self.actions]
+
 
     def _grab_raw_image(self):
         """
@@ -118,9 +122,9 @@ class AtariPlayer(gym.Env):
             if isinstance(self.viz, float):
                 cv2.imshow(self.windowname, ret)
                 cv2.waitKey(int(self.viz * 1000))
-        ret = ret.astype('float32')
-        # 0.299,0.587.0.114. same as rgb2y in torch/image
-        ret = cv2.cvtColor(ret, cv2.COLOR_RGB2GRAY)[:, :]
+        if self.grayscale:
+            # 0.299,0.587.0.114. same as rgb2y in torch/image
+            ret = cv2.cvtColor(ret, cv2.COLOR_RGB2GRAY)
         return ret.astype('uint8')  # to save some memory
 
     def _restart_episode(self):

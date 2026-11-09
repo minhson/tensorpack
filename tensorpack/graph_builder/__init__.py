@@ -10,6 +10,8 @@ if STATICA_HACK:
     from .distributed import *
     from .utils import *
 
+from .model_desc import ModelDesc, ModelDescBase
+
 from pkgutil import iter_modules
 import os
 import os.path

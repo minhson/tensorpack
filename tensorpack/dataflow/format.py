@@ -5,7 +5,6 @@
 import numpy as np
 import os
 import six
-from six.moves import range
 
 from ..utils import logger
 from ..utils.argtools import log_once
@@ -44,9 +43,9 @@ class HDF5Data(RNGDataFlow):
         """
         self.f = h5py.File(filename, 'r')
         logger.info("Loading {} to memory...".format(filename))
-        self.dps = [self.f[k].value for k in data_paths]
+        self.dps = [self.f[k][...] for k in data_paths]
         lens = [len(k) for k in self.dps]
-        assert all([k == lens[0] for k in lens])
+        assert all(k == lens[0] for k in lens)
         self._size = lens[0]
         self.shuffle = shuffle
 
@@ -118,7 +117,7 @@ class LMDBData(RNGDataFlow):
             else:
                 # check if key-format like '{:0>8d}' was given
                 if isinstance(keys, six.string_types):
-                    self.keys = map(lambda x: keys.format(x), list(np.arange(self._size)))
+                    self.keys = [keys.format(x) for x in np.arange(self._size)]
                 else:
                     self.keys = keys
 
@@ -146,8 +145,7 @@ class LMDBData(RNGDataFlow):
         with self._guard:
             if not self._shuffle:
                 c = self._txn.cursor()
-                while c.next():
-                    k, v = c.item()
+                for k, v in c:
                     if k != b'__keys__':
                         yield [k, v]
             else:
@@ -206,6 +204,26 @@ def CaffeLMDB(lmdb_path, shuffle=True, keys=None):
     return LMDBDataDecoder(lmdb_data, decoder)
 
 
+class DiskCacheData(RNGDataFlow):
+    def __init__(self, path, shuffle=True):
+        self._db = diskcache.Index(path)
+        self._shuffle = shuffle
+        self._size = len(self._db)
+
+    def __len__(self):
+        return self._size
+
+    def __iter__(self):
+        if not self._shuffle:
+            for k in range(self._size):
+                yield self._db[k]
+        else:
+            keys = list(range(self._size))
+            self.rng.shuffle(keys)
+            for k in keys:
+                yield self._db[k]
+
+
 class SVMLightData(RNGDataFlow):
     """ Read X,y from an SVMlight file, and produce [X_i, y_i] pairs. """
 
@@ -241,3 +259,8 @@ try:
 except ImportError:
     for klass in ['LMDBData', 'LMDBDataDecoder', 'CaffeLMDB']:
         globals()[klass] = create_dummy_class(klass, 'lmdb')
+
+try:
+    import diskcache
+except ImportError:
+    DiskCacheData = create_dummy_class('DiskCacheData', 'diskcache')   # noqa

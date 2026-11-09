@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 # File: mnist-tflayers.py
 
-import tensorflow as tf
-
+from tensorpack import tfv1 as tf
 from tensorpack import *
 from tensorpack.dataflow import dataset
-from tensorpack.tfutils import get_current_tower_context, summary
+from tensorpack.tfutils import summary
 
 """
 MNIST ConvNet example using tf.layers
@@ -50,8 +49,7 @@ class Model(ModelDesc):
             l = tf.layers.conv2d(l, 32, 3, name='conv3')
             l = tf.layers.flatten(l)
             l = tf.layers.dense(l, 512, activation=tf.nn.relu, name='fc0')
-            l = tf.layers.dropout(l, rate=0.5,
-                                  training=get_current_tower_context().is_training)
+            l = tf.layers.dropout(l, rate=0.5, training=self.training)
         logits = tf.layers.dense(l, 10, activation=tf.identity, name='fc1')
 
         # a vector of length B with loss of each sample
@@ -118,10 +116,10 @@ if __name__ == '__main__':
         data=FeedInput(dataset_train),
         callbacks=[
             ModelSaver(),   # save the model after every epoch
-            MaxSaver('validation_accuracy'),  # save the model with highest accuracy (prefix 'validation_')
             InferenceRunner(    # run inference(for validation) after every epoch
                 dataset_test,   # the DataFlow instance used for validation
                 ScalarStats(['cross_entropy_loss', 'accuracy'])),
+            MaxSaver('validation_accuracy'),  # save the model with highest accuracy (prefix 'validation_')
         ],
         steps_per_epoch=steps_per_epoch,
         max_epoch=100,

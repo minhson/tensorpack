@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 # File:
 
-import tensorflow as tf
-
+from tensorpack import tfv1 as tf
 from tensorpack import ModelDesc
 from tensorpack.models import GlobalAvgPooling, l2_regularizer, regularize_cost
 from tensorpack.tfutils import optimizer
 from tensorpack.tfutils.summary import add_moving_summary
-from tensorpack.tfutils.tower import get_current_tower_context
 
 from config import config as cfg
 from data import get_all_anchors, get_all_anchors_fpn
+from utils.box_ops import area as tf_area
 
 from . import model_frcnn
 from . import model_mrcnn
@@ -30,12 +29,8 @@ class GeneralizedRCNN(ModelDesc):
         image = image_preprocess(image, bgr=True)
         return tf.transpose(image, [0, 3, 1, 2])
 
-    @property
-    def training(self):
-        return get_current_tower_context().is_training
-
     def optimizer(self):
-        lr = tf.get_variable('learning_rate', initializer=0.003, trainable=False)
+        lr = tf.get_variable('learning_rate', initializer=0., trainable=False)
         tf.summary.scalar('learning_rate-summary', lr)
 
         # The learning rate in the config is set for 8 GPUs, and we use trainers with average=False.
@@ -73,6 +68,8 @@ class GeneralizedRCNN(ModelDesc):
         proposals, rpn_losses = self.rpn(image, features, anchor_inputs)  # inputs?
 
         targets = [inputs[k] for k in ['gt_boxes', 'gt_labels', 'gt_masks'] if k in inputs]
+        gt_boxes_area = tf.reduce_mean(tf_area(inputs["gt_boxes"]), name='mean_gt_box_area')
+        add_moving_summary(gt_boxes_area)
         head_losses = self.roi_heads(image, features, proposals, targets)
 
         if self.training:
@@ -221,7 +218,7 @@ class ResNetFPNModel(GeneralizedRCNN):
         return ret
 
     def slice_feature_and_anchors(self, p23456, anchors):
-        for i, stride in enumerate(cfg.FPN.ANCHOR_STRIDES):
+        for i in range(len(cfg.FPN.ANCHOR_STRIDES)):
             with tf.name_scope('FPN_slice_lvl{}'.format(i)):
                 anchors[i] = anchors[i].narrow_to(p23456[i])
 

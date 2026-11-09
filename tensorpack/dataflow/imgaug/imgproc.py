@@ -5,6 +5,7 @@
 import numpy as np
 import cv2
 
+from ...utils.develop import log_deprecated
 from .base import PhotometricAugmentor
 
 __all__ = ['Hue', 'Brightness', 'BrightnessScale', 'Contrast', 'MeanVarianceNormalize',
@@ -18,7 +19,8 @@ class Hue(PhotometricAugmentor):
     def __init__(self, range=(0, 180), rgb=True):
         """
         Args:
-            range(list or tuple): range from which the applied hue offset is selected (maximum [-90,90] or [0,180])
+            range(list or tuple): range from which the applied hue offset is selected
+                (maximum range can be [-90,90] for both uint8 and float32)
             rgb (bool): whether input is RGB or BGR.
         """
         super(Hue, self).__init__()
@@ -163,22 +165,36 @@ class MeanVarianceNormalize(PhotometricAugmentor):
 class GaussianBlur(PhotometricAugmentor):
     """ Gaussian blur the image with random window size"""
 
-    def __init__(self, max_size=3):
+    def __init__(self, size_range=(0, 3), sigma_range=(0, 0), symmetric=True, max_size=None):
         """
         Args:
-            max_size (int): max possible Gaussian window size would be 2 * max_size + 1
+            size_range (tuple[int]): Gaussian window size would be 2 * size +
+                1, where size is randomly sampled from this [low, high) range.
+            sigma_range (tuple[float]): min,max of the sigma value. 0 means
+                opencv's default.
+            symmetric (bool): whether to use the same size & sigma for x and y.
+            max_size (int): deprecated
         """
         super(GaussianBlur, self).__init__()
+        if not isinstance(size_range, (list, tuple)):
+            size_range = (0, size_range)
+        assert isinstance(sigma_range, (list, tuple)), sigma_range
+        if max_size is not None:
+            log_deprecated("GaussianBlur(max_size=)", "Use size_range= instead!", "2020-09-01")
+            size_range = (0, max_size)
         self._init(locals())
 
     def _get_augment_params(self, _):
-        sx, sy = self.rng.randint(self.max_size, size=(2,))
-        sx = sx * 2 + 1
-        sy = sy * 2 + 1
-        return sx, sy
+        size_xy = self.rng.randint(self.size_range[0], self.size_range[1], size=(2,)) * 2 + 1
+        sigma_xy = self._rand_range(*self.sigma_range, size=(2,))
+        if self.symmetric:
+            size_xy[1] = size_xy[0]
+            sigma_xy[1] = sigma_xy[0]
+        return tuple(size_xy), tuple(sigma_xy)
 
-    def _augment(self, img, s):
-        return np.reshape(cv2.GaussianBlur(img, s, sigmaX=0, sigmaY=0,
+    def _augment(self, img, prm):
+        size, sigma = prm
+        return np.reshape(cv2.GaussianBlur(img, size, sigmaX=sigma[0], sigmaY=sigma[1],
                                            borderType=cv2.BORDER_REPLICATE), img.shape)
 
 
@@ -225,13 +241,14 @@ class Saturation(PhotometricAugmentor):
         <https://github.com/facebook/fb.resnet.torch/blob/master/datasets/transforms.lua#L218>`__.
     """
 
-    def __init__(self, alpha=0.4, rgb=True):
+    def __init__(self, alpha=0.4, rgb=True, clip=True):
         """
         Args:
             alpha(float): maximum saturation change.
             rgb (bool): whether input is RGB or BGR.
+            clip (bool): clip results to [0,255] even when data type is not uint8.
         """
-        super(Saturation, self).__init__()
+        super().__init__()
         rgb = bool(rgb)
         assert alpha < 1
         self._init(locals())
@@ -244,7 +261,7 @@ class Saturation(PhotometricAugmentor):
         m = cv2.COLOR_RGB2GRAY if self.rgb else cv2.COLOR_BGR2GRAY
         grey = cv2.cvtColor(img, m)
         ret = img * v + (grey * (1 - v))[:, :, np.newaxis]
-        if old_dtype == np.uint8:
+        if self.clip or old_dtype == np.uint8:
             ret = np.clip(ret, 0, 255)
         return ret.astype(old_dtype)
 
@@ -257,16 +274,17 @@ class Lighting(PhotometricAugmentor):
         <https://github.com/facebook/fb.resnet.torch/blob/master/datasets/transforms.lua#L184>`__.
     """
 
-    def __init__(self, std, eigval, eigvec):
+    def __init__(self, std, eigval, eigvec, clip=True):
         """
         Args:
             std (float): maximum standard deviation
             eigval: a vector of (3,). The eigenvalues of 3 channels.
             eigvec: a 3x3 matrix. Each column is one eigen vector.
+            clip (bool): clip results to [0,255] even when data type is not uint8.
         """
         super(Lighting, self).__init__()
-        eigval = np.asarray(eigval)
-        eigvec = np.asarray(eigvec)
+        eigval = np.asarray(eigval, dtype="float32")
+        eigvec = np.asarray(eigvec, dtype="float32")
         assert eigval.shape == (3,)
         assert eigvec.shape == (3, 3)
         self._init(locals())
@@ -281,7 +299,7 @@ class Lighting(PhotometricAugmentor):
         v = v.reshape((3, 1))
         inc = np.dot(self.eigvec, v).reshape((3,))
         img = np.add(img, inc)
-        if old_dtype == np.uint8:
+        if self.clip or old_dtype == np.uint8:
             img = np.clip(img, 0, 255)
         return img.astype(old_dtype)
 

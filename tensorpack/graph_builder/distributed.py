@@ -3,15 +3,14 @@
 
 import re
 import tensorflow as tf
-from six.moves import range
 
 from ..tfutils.common import get_global_step_var, get_op_tensor_name
 from ..utils import logger
 from ..utils.argtools import memoized
 from .training import DataParallelBuilder, GraphBuilder
-from .utils import OverrideCachingDevice, aggregate_grads, override_to_local_variable
+from .utils import OverrideCachingDevice, split_grad_list, allreduce_grads_naive, override_to_local_variable
 
-__all__ = ['DistributedParameterServerBuilder', 'DistributedReplicatedBuilder']
+__all__ = []
 
 
 class DistributedBuilderBase(GraphBuilder):
@@ -124,7 +123,9 @@ class DistributedParameterServerBuilder(DataParallelBuilder, DistributedBuilderB
         DataParallelBuilder._check_grad_list(grad_list)
 
         with tf.device(self.param_server_device):
-            grads = aggregate_grads(grad_list, colocation=False)
+            all_grads, all_vars = split_grad_list(grad_list)
+            all_grads = allreduce_grads_naive(all_grads)
+            grads = [(g, v) for g, v in zip(all_grads, all_vars[0])]
             opt = get_opt_fn()
             train_op = opt.apply_gradients(grads, name='train_op')
         train_op = self._add_sync_queues_and_barrier('all_workers_sync_barrier', [train_op])
@@ -231,7 +232,7 @@ class DistributedReplicatedBuilder(DataParallelBuilder, DistributedBuilderBase):
             list of (shadow_model_var, local_model_var) used for syncing.
         """
         G = tf.get_default_graph()
-        curr_shadow_vars = set([v.name for v in shadow_vars])
+        curr_shadow_vars = {v.name for v in shadow_vars}
         model_vars = tf.model_variables()
         shadow_model_vars = []
         for v in model_vars:
@@ -286,8 +287,9 @@ class DistributedReplicatedBuilder(DataParallelBuilder, DistributedBuilderBase):
             use_vs=[True] * len(self.towers))  # open vs at each tower
         DataParallelBuilder._check_grad_list(grad_list)
 
-        avg_grads = aggregate_grads(
-            grad_list, colocation=False, devices=self.raw_devices)
+        all_grads, all_vars = split_grad_list(grad_list)
+        avg_grads = allreduce_grads_naive(all_grads, devices=self.raw_devices)  # N
+        avg_grads = [(g, v) for g, v in zip(all_grads, all_vars[0])]
         with tf.device(self.param_server_device):
             ps_var_grads = DistributedReplicatedBuilder._apply_shadow_vars(avg_grads)
             var_update_ops = self._apply_gradients_and_copy(
@@ -347,7 +349,7 @@ class DistributedReplicatedBuilder(DataParallelBuilder, DistributedBuilderBase):
                 return s[:-2]
             return s
         local_vars = tf.local_variables()
-        local_var_by_name = dict([(strip_port(v.name), v) for v in local_vars])
+        local_var_by_name = {strip_port(v.name): v for v in local_vars}
         ops = []
         nr_shadow_vars = len(self._shadow_vars)
         for v in self._shadow_vars:

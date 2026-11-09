@@ -3,10 +3,10 @@
 
 
 import abc
-import tensorflow as tf
 
 from tensorpack import ModelDesc
-from tensorpack.tfutils import get_current_tower_context, gradproc, optimizer, summary, varreplace
+from tensorpack.compat import tfv1 as tf
+from tensorpack.tfutils import gradproc, optimizer, summary, varreplace
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
 from tensorpack.utils import logger
 
@@ -60,7 +60,7 @@ class Model(ModelDesc):
             [-1] * (input_rank - 1) + [self.history], name='state')
 
         self.predict_value = self.get_DQN_prediction(state)
-        if not get_current_tower_context().is_training:
+        if not self.training:
             return
 
         reward = tf.clip_by_value(reward, -1, 1)
@@ -100,18 +100,19 @@ class Model(ModelDesc):
 
     def optimizer(self):
         lr = tf.get_variable('learning_rate', initializer=1e-3, trainable=False)
-        opt = tf.train.RMSPropOptimizer(lr, epsilon=1e-5)
+        tf.summary.scalar("learning_rate-summary", lr)
+        opt = tf.train.RMSPropOptimizer(lr, decay=0.95, momentum=0.95, epsilon=1e-2)
         return optimizer.apply_grad_processors(opt, [gradproc.SummaryGradient()])
 
     @staticmethod
     def update_target_param():
         vars = tf.global_variables()
+        vars_mapping = {x.name: x for x in vars}
         ops = []
-        G = tf.get_default_graph()
         for v in vars:
-            target_name = v.op.name
+            target_name = v.name
             if target_name.startswith('target'):
                 new_name = target_name.replace('target/', '')
                 logger.info("Target Network Update: {} <- {}".format(target_name, new_name))
-                ops.append(v.assign(G.get_tensor_by_name(new_name + ':0')))
+                ops.append(v.assign(vars_mapping[new_name]))
         return tf.group(*ops, name='update_target_network')

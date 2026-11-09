@@ -1,6 +1,7 @@
 #!/bin/bash -ev
 # File: run-tests.sh
 
+mkdir -p "$TENSORPACK_DATASET"
 DIR=$(dirname $0)
 cd $DIR
 
@@ -14,10 +15,13 @@ python -c "from tensorflow.python.training.monitored_session import _HookedSessi
 python -c "import tensorflow as tf; tf.Operation._add_control_input"
 
 # run tests
-python -m tensorpack.callbacks.param_test
-python -m tensorpack.tfutils.unit_tests
-python -m unittest tensorpack.dataflow.imgaug._test
-TENSORPACK_SERIALIZE=pyarrow python test_serializer.py
-TENSORPACK_SERIALIZE=msgpack python test_serializer.py
+python -m unittest tensorpack.callbacks.param_test
+python -m unittest tensorpack.tfutils.unit_tests
+python -m unittest tensorpack.dataflow.imgaug.imgaug_test
+python -m unittest tensorpack.models.models_test
 
+# TENSORPACK_SERIALIZE=pyarrow python ...
+python -m unittest tensorpack.dataflow.serialize_test
+
+# e2e tests
 python -m unittest discover -v

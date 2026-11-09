@@ -1,10 +1,9 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 # File: cifar-convnet.py
 # Author: Yuxin Wu
 import argparse
 import os
-import tensorflow as tf
+from tensorpack import tfv1 as tf
 
 from tensorpack import *
 from tensorpack.dataflow import dataset
@@ -33,10 +32,9 @@ class Model(ModelDesc):
                 tf.TensorSpec((None,), tf.int32, 'label')]
 
     def build_graph(self, image, label):
-        is_training = get_current_tower_context().is_training
-        drop_rate = tf.constant(0.5 if is_training else 0.0)
+        drop_rate = tf.constant(0.5 if self.training else 0.0)
 
-        if is_training:
+        if self.training:
             tf.summary.image("train_image", image, 10)
         if tf.test.is_gpu_available():
             image = tf.transpose(image, [0, 3, 1, 2])
@@ -144,8 +142,7 @@ if __name__ == '__main__':
     with tf.Graph().as_default():
         logger.set_logger_dir(os.path.join('train_log', 'cifar' + str(args.classnum)))
         config = get_config(args.classnum)
-        if args.load:
-            config.session_init = SaverRestore(args.load)
+        config.session_init = SmartInit(args.load)
 
         num_gpu = get_num_gpu()
         trainer = SimpleTrainer() if num_gpu <= 1 \

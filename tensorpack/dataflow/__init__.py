@@ -13,6 +13,7 @@ if STATICA_HACK:
     from .parallel import *
     from .raw import *
     from .remote import *
+    from .serialize import *
     from . import imgaug
     from . import dataset
 
@@ -29,7 +30,7 @@ def _global_import(name):
     p = __import__(name, globals(), locals(), level=1)
     lst = p.__all__ if '__all__' in dir(p) else dir(p)
     if lst:
-        del globals()[name]
+        globals().pop(name, None)
         for k in lst:
             if not k.startswith('__'):
                 globals()[k] = p.__dict__[k]
@@ -43,7 +44,8 @@ for _, module_name, __ in iter_modules(
     srcpath = os.path.join(_CURR_DIR, module_name + '.py')
     if not os.path.isfile(srcpath):
         continue
-    if not module_name.startswith('_') and \
+    if "_test" not in module_name and \
+       not module_name.startswith('_') and \
             module_name not in __SKIP:
         _global_import(module_name)
 

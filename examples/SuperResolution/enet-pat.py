@@ -55,7 +55,6 @@ class Model(GANModelDesc):
 
     def build_graph(self, Ilr, Ihr):
         Ilr, Ihr = Ilr / 255.0, Ihr / 255.0
-        ctx = get_current_tower_context()
         Ibicubic = tf.image.resize_bicubic(
             Ilr, [4 * self.height, 4 * self.width], align_corners=True,
             name='bicubic_baseline')    # (0,1)
@@ -182,7 +181,7 @@ class Model(GANModelDesc):
 
         tf.multiply(fake_hr, 255.0, name='prediction')
 
-        if ctx.is_training:
+        if self.training:
             with tf.variable_scope('discrim'):
                 real_score = discriminator(real_hr)
                 fake_score = discriminator(fake_hr)
@@ -228,7 +227,7 @@ def apply(model_path, lowres_path="", output_path='.'):
 
     predict_func = OfflinePredictor(PredictConfig(
         model=Model(LR_SIZE_H, LR_SIZE_W),
-        session_init=get_model_loader(model_path),
+        session_init=SmartInit(model_path),
         input_names=['Ilr'],
         output_names=['prediction']))
 
@@ -280,12 +279,12 @@ if __name__ == '__main__':
         logger.auto_set_dir()
 
         if args.load:
-            session_init = SaverRestore(args.load)
+            session_init = SmartInit(args.load)
         else:
             assert os.path.isfile(args.vgg19)
             param_dict = dict(np.load(args.vgg19))
             param_dict = {'VGG19/' + name: value for name, value in six.iteritems(param_dict)}
-            session_init = DictRestore(param_dict)
+            session_init = SmartInit(param_dict)
 
         nr_tower = max(get_num_gpu(), 1)
         data = QueueInput(get_data(args.data))

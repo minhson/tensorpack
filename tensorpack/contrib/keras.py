@@ -49,12 +49,12 @@ class KerasModelCaller(object):
         """
         reuse = tf.get_variable_scope().reuse
 
-        old_trainable_names = set([x.name for x in tf.trainable_variables()])
+        old_trainable_names = {x.name for x in tf.trainable_variables()}
         trainable_backup = backup_collection([tf.GraphKeys.TRAINABLE_VARIABLES])
         update_ops_backup = backup_collection([tf.GraphKeys.UPDATE_OPS])
 
         def post_process_model(model):
-            added_trainable_names = set([x.name for x in tf.trainable_variables()])
+            added_trainable_names = {x.name for x in tf.trainable_variables()}
             restore_collection(trainable_backup)
 
             for v in model.weights:
@@ -62,7 +62,7 @@ class KerasModelCaller(object):
                 # We put M.weights into the collection instead.
                 if v.name not in old_trainable_names and v.name in added_trainable_names:
                     tf.add_to_collection(tf.GraphKeys.TRAINABLE_VARIABLES, v)
-            new_trainable_names = set([x.name for x in tf.trainable_variables()])
+            new_trainable_names = {x.name for x in tf.trainable_variables()}
 
             for n in added_trainable_names:
                 if n not in new_trainable_names:
@@ -224,7 +224,7 @@ def setup_keras_trainer(
 
 class KerasModel(object):
     def __init__(self, get_model, input_signature=None, target_signature=None,
-                 input=None, trainer=None, inputs_desc=None, targets_desc=None):
+                 input=None, trainer=None):
         """
         Args:
             get_model (input1, input2, ... -> keras.Model):
@@ -234,12 +234,7 @@ class KerasModel(object):
             target_signature ([tf.TensorSpec]): required. The signature for the targets tensors.
             input (InputSource | DataFlow): the InputSource or DataFlow where the input data comes from.
             trainer (Trainer): the default will check the number of available GPUs and use them all.
-            inputs_desc, targets_desc: deprecated names for `input_signature` and `target_signature`
         """
-        if inputs_desc is not None:
-            input_signature = inputs_desc
-        if targets_desc is not None:
-            target_signature = targets_desc
         self.get_model = get_model
         assert callable(get_model), get_model
         self.input_signature = input_signature

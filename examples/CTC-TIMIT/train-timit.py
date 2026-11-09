@@ -6,7 +6,6 @@
 import argparse
 import os
 import tensorflow as tf
-from six.moves import range
 
 from tensorpack import *
 from tensorpack.tfutils.gradproc import GlobalNormClip, SummaryGradient
@@ -55,8 +54,7 @@ class Model(ModelDesc):
 
         logits = tf.transpose(logits, [1, 0, 2])
 
-        isTrain = get_current_tower_context().is_training
-        if isTrain:
+        if self.training:
             # beam search is too slow to run in training
             predictions = tf.cast(
                 tf.nn.ctc_greedy_decoder(logits, seqlen)[0][0], tf.int32)
@@ -120,6 +118,5 @@ if __name__ == '__main__':
     ds_test = get_data(args.test, False, args.stat)
 
     config = get_config(ds_train, ds_test)
-    if args.load:
-        config.session_init = SaverRestore(args.load)
+    config.session_init = SmartInit(args.load)
     launch_train_with_config(config, SimpleTrainer())

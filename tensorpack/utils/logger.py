@@ -46,7 +46,9 @@ class _MyFormatter(logging.Formatter):
 
 
 def _getlogger():
-    logger = logging.getLogger('tensorpack')
+    # this file is synced to "dataflow" package as well
+    package_name = "dataflow" if __name__.startswith("dataflow") else "tensorpack"
+    logger = logging.getLogger(package_name)
     logger.propagate = False
     logger.setLevel(logging.INFO)
     handler = logging.StreamHandler(sys.stdout)
@@ -109,6 +111,7 @@ def set_logger_dir(dirname, action=None):
                 old states for you. It simply does nothing.
 
     """
+    dirname = os.path.normpath(dirname)
     global LOG_DIR, _FILE_HANDLER
     if _FILE_HANDLER:
         # unload and close the old file handler, so that we may safely delete the logger directory
@@ -121,9 +124,9 @@ def set_logger_dir(dirname, action=None):
 
     if dir_nonempty(dirname):
         if not action:
-            _logger.warn("""\
+            _logger.warning("""\
 Log directory {} exists! Use 'd' to delete it. """.format(dirname))
-            _logger.warn("""\
+            _logger.warning("""\
 If you're resuming from a previous run, you can choose to keep it.
 Press any other key to exit. """)
         while not action:

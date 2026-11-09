@@ -7,7 +7,6 @@ It also contains an implementation of the following papers:
 + [Trained Ternary Quantization](https://arxiv.org/abs/1612.01064), with (W,A,G)=(t,32,32).
 + [Binarized Neural Networks](https://arxiv.org/abs/1602.02830), with (W,A,G)=(1,1,32).
 
-Alternative link to this page: [http://dorefa.net](http://dorefa.net)
 
 ## Results:
 This is a good set of baselines for research in model quantization.
@@ -46,7 +45,7 @@ In this implementation, quantized operations are all performed through `tf.float
 + Look at the docstring in `*-dorefa.py` to see detailed usage and performance.
 
 Pretrained model for (1,4,32)-ResNet18 and several AlexNet are available at
-[tensorpack model zoo](http://models.tensorpack.com/DoReFa-Net/).
+[tensorpack model zoo](http://models.tensorpack.com/#DoReFa-Net).
 They're provided in the format of numpy dictionary.
 The __binary-weight 4-bit-activation ResNet-18__ model has 59.2% top-1 validation accuracy.
 

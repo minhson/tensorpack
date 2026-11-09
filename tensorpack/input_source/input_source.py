@@ -6,7 +6,6 @@ import threading
 from contextlib import contextmanager
 from itertools import chain
 import tensorflow as tf
-from six.moves import range, zip
 
 from ..compat import tfv1
 from ..callbacks.base import Callback, CallbackFactory
@@ -18,8 +17,7 @@ from ..tfutils.summary import add_moving_summary
 from ..tfutils.tower import get_current_tower_context
 from ..utils import logger
 from ..utils.concurrency import ShareSessionThread
-from .input_source_base import InputSource
-from ..graph_builder.model_desc import build_or_reuse_placeholder
+from .input_source_base import InputSource, build_or_reuse_placeholder
 
 try:
     from tensorflow.python.ops.data_flow_ops import StagingArea
@@ -136,7 +134,7 @@ class FeedfreeInput(InputSource):
 class EnqueueThread(ShareSessionThread):
     def __init__(self, queue, ds, placehdrs):
         super(EnqueueThread, self).__init__()
-        self.name = 'EnqueueThread ' + queue.name
+        self.name = 'EnqueueThread: enqueue dataflow to TF queue "{}"'.format(queue.name)
         self.daemon = True
         self.dataflow = ds
         self.queue = queue
@@ -443,40 +441,81 @@ class ZMQInput(TensorInput):
             hwm=self._hwm,
             bind=self._bind)
 
+    def to_dataset(self, input_signature):
+        """
+        Convert to a TF dataset.
+
+        Args:
+            input_signature (list[InputSpec]):
+
+        Returns:
+            tf.data.Dataset
+        """
+        import zmq_ops
+        zmq_pull_socket = zmq_ops.ZMQPullSocket(
+            self._end_point, [x.dtype for x in input_signature],
+            hwm=self._hwm, bind=self._bind)
+
+        def mapper(_):
+            inputs = list(zmq_pull_socket.pull())
+            for v, sig in zip(inputs, input_signature):
+                v.set_shape(sig.shape)
+            return inputs
+
+        # Is there a better way to construct from stateful tensor?
+        dataset = tf.data.Dataset.from_tensors([1])  # just a placeholder
+        return dataset.map(mapper)
+
 
 class TFDatasetInput(FeedfreeInput):
     """
     Use a :class:`tf.data.Dataset` instance as input.
 
     Note:
-        In training, the dataset should be infinite (use :func:`repeat()`).
+        1. In training, the given dataset or dataflow has to be infinite
+            (you can use :func:`repeat()`, or :class:`RepeatedData` ).
+
+        2. TensorFlow may keep the dataflow alive even if the dataset is no
+           longer used.
     """
     def __init__(self, dataset):
         """
         Args:
-            dataset (tf.data.Dataset):
+            dataset (tf.data.Dataset or DataFlow):
         """
-        if not isinstance(dataset, tf.data.Dataset):
-            raise ValueError("TFDatasetInput takes a tf.data.Dataset! Got {}".format(dataset))
-        self._dataset = dataset
+        if isinstance(dataset, tf.data.Dataset):
+            self._dataset = dataset
+            self._dataflow = None
+        elif isinstance(dataset, DataFlow):
+            self._dataset = None
+            self._dataflow = dataset
+        else:
+            raise ValueError("TFDatasetInput takes a tf.data.Dataset or DataFlow! Got {}".format(dataset))
 
     def _setup(self, input_signature):
         self._spec = input_signature
-        types = self._dataset.output_types
-        spec_types = tuple([k.dtype for k in input_signature])
-        assert len(types) == len(spec_types), \
-            "Dataset and input signature have different length! {} != {}".format(
-                len(types), len(spec_types))
-        assert types == spec_types, \
-            "Data types of dataset and input signature don't match! {} != {}".format(
-                str(types), str(spec_types))
-        shapes = self._dataset.output_shapes
-        spec_shapes = [k.shape for k in input_signature]
-        for idx, (s1, s2) in enumerate(zip(shapes, spec_shapes)):
-            s2 = tf.TensorShape(s2)
-            assert s2.is_compatible_with(s1), \
-                "Input signature '{}' has incompatible shape with dataset! {} vs {}".format(
-                    input_signature[idx].name, s2, s1)
+        if self._dataset is not None:
+            types = self._dataset.output_types
+            if len(types) == 1:
+                types = (types,)
+            spec_types = tuple(k.dtype for k in input_signature)
+            assert len(types) == len(spec_types), \
+                "Dataset and input signature have different length! {} != {}".format(
+                    len(types), len(spec_types))
+            assert types == spec_types, \
+                "Data types of dataset and input signature don't match! {} != {}".format(
+                    str(types), str(spec_types))
+
+            shapes = self._dataset.output_shapes
+            spec_shapes = [k.shape for k in input_signature]
+            for idx, (s1, s2) in enumerate(zip(shapes, spec_shapes)):
+                s2 = tf.TensorShape(s2)
+                assert s2.is_compatible_with(s1), \
+                    "Input signature '{}' has incompatible shape with dataset! {} vs {}".format(
+                        input_signature[idx].name, s2, s1)
+        else:
+            self._dataset = TFDatasetInput.dataflow_to_dataset(self._dataflow, [x.dtype for x in input_signature])
+
         self._iterator = self._dataset.make_initializable_iterator()
         self._init_op = self._iterator.initializer
 
@@ -508,11 +547,15 @@ class TFDatasetInput(FeedfreeInput):
 
         Returns:
             (tf.data.Dataset)
+
+        Note:
+            TensorFlow may keep the dataflow alive even if the dataset is no
+            longer used.
         """
         # TODO theoretically it can support dict
         assert isinstance(df, DataFlow), df
         assert isinstance(types, (list, tuple)), types
-        df = MapData(df, lambda dp: tuple(dp))
+        df = MapData(df, tuple)
         df.reset_state()
         ds = tf.data.Dataset.from_generator(
             df.get_data, tuple(types))
@@ -554,7 +597,7 @@ class StagingInput(FeedfreeInput):
 
         def _prefill(self, sess):
             logger.info("Pre-filling StagingArea ...")
-            for k in range(self.nr_stage):
+            for _ in range(self.nr_stage):
                 self.stage_op.run(session=sess)
             logger.info("{} element{} put into StagingArea on each tower.".format(
                 self.nr_stage, "s were" if self.nr_stage > 1 else " was"))

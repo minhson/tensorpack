@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+
+from collections import defaultdict
+
 __all__ = ['DatasetRegistry', 'DatasetSplit']
 
 
@@ -21,15 +24,19 @@ class DatasetSplit():
         boxes: numpy array of kx4 floats, each row is [x1, y1, x2, y2]
         class: numpy array of k integers, in the range of [1, #categories], NOT [0, #categories)
         is_crowd: k booleans. Use k False if you don't know what it means.
-        segmentation: k lists of numpy arrays (one for each instance).
+        segmentation: k lists of numpy arrays.
             Each list of numpy arrays corresponds to the mask for one instance.
             Each numpy array in the list is a polygon of shape Nx2,
             because one mask can be represented by N polygons.
+            Each row in the Nx2 array is a (x, y) coordinate.
 
             If your segmentation annotations are originally masks rather than polygons,
             either convert it, or the augmentation will need to be changed or skipped accordingly.
 
             Include this field only if training Mask R-CNN.
+
+        Coordinates in boxes & polygons are absolute coordinates in unit of pixels, unless
+        cfg.DATA.ABSOLUTE_COORD is False.
         """
         raise NotImplementedError()
 
@@ -67,6 +74,7 @@ class DatasetSplit():
 
 class DatasetRegistry():
     _registry = {}
+    _metadata_registry = defaultdict(dict)
 
     @staticmethod
     def register(name, func):
@@ -89,3 +97,25 @@ class DatasetRegistry():
         """
         assert name in DatasetRegistry._registry, "Dataset {} was not registered!".format(name)
         return DatasetRegistry._registry[name]()
+
+    @staticmethod
+    def register_metadata(name, key, value):
+        """
+        Args:
+            name (str): the name of the dataset split, e.g. "coco_train2017"
+            key: the key of the metadata, e.g., "class_names"
+            value: the value of the metadata
+        """
+        DatasetRegistry._metadata_registry[name][key] = value
+
+    @staticmethod
+    def get_metadata(name, key):
+        """
+        Args:
+            name (str): the name of the dataset split, e.g. "coco_train2017"
+            key: the key of the metadata, e.g., "class_names"
+
+        Returns:
+            value
+        """
+        return DatasetRegistry._metadata_registry[name][key]

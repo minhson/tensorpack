@@ -50,12 +50,11 @@ class Model(ModelDesc):
                 tf.TensorSpec((None, SEQ_LEN), tf.int32, 'nextinput')]
 
     def build_graph(self, input, nextinput):
-        is_training = get_current_tower_context().is_training
         initializer = tf.random_uniform_initializer(-0.05, 0.05)
 
         def get_basic_cell():
             cell = rnn.BasicLSTMCell(num_units=HIDDEN_SIZE, forget_bias=0.0, reuse=tf.get_variable_scope().reuse)
-            if is_training:
+            if self.training:
                 cell = rnn.DropoutWrapper(cell, output_keep_prob=1 - DROPOUT)
             return cell
 
@@ -175,6 +174,5 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
     config = get_config()
-    if args.load:
-        config.session_init = SaverRestore(args.load)
+    config.session_init = SmartInit(args.load)
     launch_train_with_config(config, SimpleTrainer())

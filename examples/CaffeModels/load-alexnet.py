@@ -1,11 +1,9 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 # File: load-alexnet.py
 # Author: Yuxin Wu
 
 from __future__ import print_function
 import argparse
-import numpy as np
 import os
 import cv2
 import tensorflow as tf
@@ -39,11 +37,10 @@ def tower_func(image):
 
 
 def run_test(path, input):
-    param_dict = dict(np.load(path))
     predictor = OfflinePredictor(PredictConfig(
         input_signature=[tf.TensorSpec((None, 227, 227, 3), tf.float32, 'input')],
         tower_func=tower_func,
-        session_init=DictRestore(param_dict),
+        session_init=SmartInit(path),
         input_names=['input'],
         output_names=['prob']
     ))

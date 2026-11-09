@@ -4,9 +4,7 @@
 import copy
 import time
 import weakref
-import six
 import tensorflow as tf
-from six.moves import range
 
 from ..compat import tfv1
 from ..callbacks import Callback, Callbacks, Monitors, MonitorBase
@@ -128,7 +126,7 @@ class Trainer(object):
     2. Increase the global_step
     3. Evaluate some summaries
 
-    Typically you __should not__ use ``hooked_sess.run`` in callbacks,
+    Typically you **should not** use ``hooked_sess.run`` in callbacks,
     because it is for the "training iteration". If you just want to evaluate
     some tensors, use ``sess.run`` if the tensors does not depend on the inputs,
     or more generally, use `before_run/after_run` to evaluate the tensors **along with**
@@ -292,6 +290,9 @@ class Trainer(object):
             except KeyboardInterrupt:
                 logger.info("Detected Ctrl-C and exiting main loop.")
                 raise
+            except Exception:
+                logger.error("Training failed at global_step={}".format(self.loop.global_step))
+                raise
             finally:
                 self._callbacks.after_train()
                 self.hooked_sess.close()
@@ -360,11 +361,10 @@ def _get_property(name):
     """
     ret = property(
         lambda self: getattr(self.loop, name))
-    if six.PY3:     # __doc__ is readonly in Py2
-        try:
-            ret.__doc__ = getattr(TrainLoop, name).__doc__
-        except AttributeError:
-            pass
+    try:
+        ret.__doc__ = getattr(TrainLoop, name).__doc__
+    except AttributeError:
+        pass
     return ret
 
 

@@ -7,24 +7,23 @@ import os
 import shutil
 import tensorflow as tf
 import cv2
-import six
 import tqdm
-
-assert six.PY3, "This example requires Python 3!"
 
 import tensorpack.utils.viz as tpviz
 from tensorpack.predict import MultiTowerOfflinePredictor, OfflinePredictor, PredictConfig
-from tensorpack.tfutils import get_model_loader, get_tf_version_tuple
+from tensorpack.tfutils import SmartInit, get_tf_version_tuple
 from tensorpack.tfutils.export import ModelExporter
 from tensorpack.utils import fs, logger
 
-from dataset import DatasetRegistry, register_coco
+from dataset import DatasetRegistry, register_coco, register_balloon
 from config import config as cfg
 from config import finalize_configs
 from data import get_eval_dataflow, get_train_dataflow
 from eval import DetectionResult, multithread_predict_dataflow, predict_image
 from modeling.generalized_rcnn import ResNetC4Model, ResNetFPNModel
-from viz import draw_annotation, draw_final_outputs, draw_predictions, draw_proposal_recall
+from viz import (
+    draw_annotation, draw_final_outputs, draw_predictions,
+    draw_proposal_recall, draw_final_outputs_blackwhite)
 
 
 def do_visualize(model, model_path, nr_visualize=100, output_dir='output'):
@@ -36,7 +35,7 @@ def do_visualize(model, model_path, nr_visualize=100, output_dir='output'):
 
     pred = OfflinePredictor(PredictConfig(
         model=model,
-        session_init=get_model_loader(model_path),
+        session_init=SmartInit(model_path),
         input_names=['image', 'gt_boxes', 'gt_labels'],
         output_names=[
             'generate_{}_proposals/boxes'.format('fpn' if cfg.MODE_FPN else 'rpn'),
@@ -97,7 +96,10 @@ def do_evaluate(pred_config, output_file):
 def do_predict(pred_func, input_file):
     img = cv2.imread(input_file, cv2.IMREAD_COLOR)
     results = predict_image(img, pred_func)
-    final = draw_final_outputs(img, results)
+    if cfg.MODE_MASK:
+        final = draw_final_outputs_blackwhite(img, results)
+    else:
+        final = draw_final_outputs(img, results)
     viz = np.concatenate((img, final), axis=1)
     cv2.imwrite("output.png", viz)
     logger.info("Inference output for {} written to output.png".format(input_file))
@@ -115,13 +117,15 @@ if __name__ == '__main__':
     parser.add_argument('--benchmark', action='store_true', help="Benchmark the speed of the model + postprocessing")
     parser.add_argument('--config', help="A list of KEY=VALUE to overwrite those defined in config.py",
                         nargs='+')
-    parser.add_argument('--compact', help='Save a model to .pb')
-    parser.add_argument('--serving', help='Save a model to serving file')
+    parser.add_argument('--output-pb', help='Save a model to .pb')
+    parser.add_argument('--output-serving', help='Save a model to serving file')
 
     args = parser.parse_args()
     if args.config:
         cfg.update_args(args.config)
     register_coco(cfg.DATA.BASEDIR)  # add COCO datasets to the registry
+    register_balloon(cfg.DATA.BASEDIR)
+
     MODEL = ResNetFPNModel() if cfg.MODE_FPN else ResNetC4Model()
 
     if not tf.test.is_gpu_available():
@@ -139,14 +143,14 @@ if __name__ == '__main__':
     else:
         predcfg = PredictConfig(
             model=MODEL,
-            session_init=get_model_loader(args.load),
+            session_init=SmartInit(args.load),
             input_names=MODEL.get_inference_tensor_names()[0],
             output_names=MODEL.get_inference_tensor_names()[1])
 
-        if args.compact:
-            ModelExporter(predcfg).export_compact(args.compact, optimize=False)
-        elif args.serving:
-            ModelExporter(predcfg).export_serving(args.serving, optimize=False)
+        if args.output_pb:
+            ModelExporter(predcfg).export_compact(args.output_pb, optimize=False)
+        elif args.output_serving:
+            ModelExporter(predcfg).export_serving(args.output_serving)
 
         if args.predict:
             predictor = OfflinePredictor(predcfg)
@@ -159,7 +163,7 @@ if __name__ == '__main__':
             df = get_eval_dataflow(cfg.DATA.VAL[0])
             df.reset_state()
             predictor = OfflinePredictor(predcfg)
-            for img in tqdm.tqdm(df, total=len(df)):
-                # This include post-processing time, which is done on CPU and not optimized
+            for _, img in enumerate(tqdm.tqdm(df, total=len(df), smoothing=0.5)):
+                # This includes post-processing time, which is done on CPU and not optimized
                 # To exclude it, modify `predict_image`.
                 predict_image(img[0], predictor)

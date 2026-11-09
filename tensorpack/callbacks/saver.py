@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 from ..compat import tfv1 as tf
-from ..utils import logger
+from ..utils import fs, logger
 from .base import Callback
 
 __all__ = ['ModelSaver', 'MinSaver', 'MaxSaver']
@@ -42,7 +42,10 @@ class ModelSaver(Callback):
         if checkpoint_dir is not None:
             if not tf.gfile.IsDirectory(checkpoint_dir):  # v2: tf.io.gfile.isdir
                 tf.gfile.MakeDirs(checkpoint_dir)  # v2: tf.io.gfile.makedirs
-        self.checkpoint_dir = checkpoint_dir
+        # If None, allow it to be init, but fail later if used
+        # For example, if chief_only=True, it can still be safely initialized
+        # in non-chief workers which don't have logger dir
+        self.checkpoint_dir = fs.normpath(checkpoint_dir) if checkpoint_dir is not None else checkpoint_dir
 
     def _setup_graph(self):
         assert self.checkpoint_dir is not None, \
@@ -77,8 +80,9 @@ class ModelSaver(Callback):
                 global_step=tf.train.get_global_step(),
                 write_meta_graph=False)
             logger.info("Model saved to %s." % tf.train.get_checkpoint_state(self.checkpoint_dir).model_checkpoint_path)
-        except (OSError, IOError, tf.errors.PermissionDeniedError,
-                tf.errors.ResourceExhaustedError):   # disk error sometimes.. just ignore it
+        except (IOError, tf.errors.PermissionDeniedError,
+                tf.errors.ResourceExhaustedError,
+                tf.errors.AlreadyExistsError):   # disk error sometimes.. just ignore it
             logger.exception("Exception in ModelSaver!")
 
 
@@ -118,6 +122,7 @@ class MinSaver(Callback):
         self.checkpoint_dir = checkpoint_dir
         if self.checkpoint_dir is None:
             self.checkpoint_dir = logger.get_logger_dir()
+        self.checkpoint_dir = fs.normpath(self.checkpoint_dir)
 
     def _get_stat(self):
         try:

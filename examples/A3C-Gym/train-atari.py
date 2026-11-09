@@ -9,11 +9,13 @@ import gym
 import multiprocessing as mp
 import numpy as np
 import os
-import six
 import sys
 import uuid
 import tensorflow as tf
 from six.moves import queue
+from concurrent import futures
+CancelledError = futures.CancelledError
+
 
 from tensorpack import *
 from tensorpack.tfutils.gradproc import MapGradient, SummaryGradient
@@ -24,12 +26,6 @@ from tensorpack.utils.serialize import dumps
 from atari_wrapper import FireResetEnv, FrameStack, LimitLength, MapState
 from common import Evaluator, eval_model_multithread, play_n_episodes
 from simulator import SimulatorMaster, SimulatorProcess, TransitionExperience
-
-if six.PY3:
-    from concurrent import futures
-    CancelledError = futures.CancelledError
-else:
-    CancelledError = Exception
 
 IMAGE_SIZE = (84, 84)
 FRAME_HISTORY = 4
@@ -50,13 +46,20 @@ ENV_NAME = None
 
 
 def get_player(train=False, dumpdir=None):
-    env = gym.make(ENV_NAME)
+    use_gym = not ENV_NAME.endswith(".bin")
+    if use_gym:
+        env = gym.make(ENV_NAME)
+    else:
+        from atari import AtariPlayer
+        env = AtariPlayer(ENV_NAME, frame_skip=4, viz=False,
+                          live_lost_as_eoe=train, max_num_frames=60000,
+                          grayscale=False)
     if dumpdir:
         env = gym.wrappers.Monitor(env, dumpdir, video_callable=lambda _: True)
     env = FireResetEnv(env)
     env = MapState(env, lambda im: cv2.resize(im, IMAGE_SIZE))
     env = FrameStack(env, 4)
-    if train:
+    if train and use_gym:
         env = LimitLength(env, 60000)
     return env
 
@@ -79,8 +82,9 @@ class Model(ModelDesc):
         assert state.shape.rank == 5  # Batch, H, W, Channel, History
         state = tf.transpose(state, [0, 1, 2, 4, 3])  # swap channel & history, to be compatible with old models
         image = tf.reshape(state, [-1] + list(STATE_SHAPE[:2]) + [STATE_SHAPE[2] * FRAME_HISTORY])
+        image = tf.cast(image, tf.float32)
 
-        image = tf.cast(image, tf.float32) / 255.0
+        image = image / 255.0
         with argscope(Conv2D, activation=tf.nn.relu):
             l = Conv2D('conv0', image, 32, 5)
             l = MaxPooling('pool0', l, 2)
@@ -100,8 +104,7 @@ class Model(ModelDesc):
         logits, value = self._get_NN_prediction(state)
         value = tf.squeeze(value, [1], name='pred_value')  # (B,)
         policy = tf.nn.softmax(logits, name='policy')
-        is_training = get_current_tower_context().is_training
-        if not is_training:
+        if not self.training:
             return
         log_probs = tf.log(policy + 1e-6)
 
@@ -170,7 +173,7 @@ class MySimulatorMaster(SimulatorMaster, Callback):
             try:
                 distrib, value = outputs.result()
             except CancelledError:
-                logger.info("Client {} cancelled.".format(client.ident))
+                logger.info("Client {} cancelled.".format(client.ident.decode('utf-8')))
                 return
             assert np.all(np.isfinite(distrib)), distrib
             action = np.random.choice(len(distrib), p=distrib)
@@ -205,7 +208,7 @@ class MySimulatorMaster(SimulatorMaster, Callback):
 
         mem.reverse()
         R = float(init_r)
-        for idx, k in enumerate(mem):
+        for k in mem:
             R = np.clip(k.reward, -1, 1) + GAMMA * R
             self.queue.put([k.state, k.action, R, k.prob])
 
@@ -220,10 +223,6 @@ class MySimulatorMaster(SimulatorMaster, Callback):
 
 
 def train():
-    assert tf.test.is_gpu_available(), "Training requires GPUs!"
-    dirname = os.path.join('train_log', 'train-atari-{}'.format(ENV_NAME))
-    logger.set_logger_dir(dirname)
-
     # assign GPUs for training & inference
     num_gpu = get_num_gpu()
     global PREDICTOR_THREAD
@@ -266,7 +265,7 @@ def train():
         ],
         session_creator=sesscreate.NewSessionCreator(config=get_default_sess_config(0.5)),
         steps_per_epoch=STEPS_PER_EPOCH,
-        session_init=get_model_loader(args.load) if args.load else None,
+        session_init=SmartInit(args.load),
         max_epoch=1000,
     )
     trainer = SimpleTrainer() if num_gpu == 1 else AsyncMultiGPUTrainer(train_tower)
@@ -280,9 +279,11 @@ if __name__ == '__main__':
     parser.add_argument('--env', help='env', required=True)
     parser.add_argument('--task', help='task to perform',
                         choices=['play', 'eval', 'train', 'dump_video'], default='train')
-    parser.add_argument('--output', help='output directory for submission', default='output_dir')
+    parser.add_argument('--output', help='output directory for logs and videos')
     parser.add_argument('--episode', help='number of episode to eval', default=100, type=int)
     args = parser.parse_args()
+    if args.output is None:
+        args.output = os.path.join('train_log', 'train-atari-{}'.format(args.env))
 
     ENV_NAME = args.env
     NUM_ACTIONS = get_player().action_space.n
@@ -295,7 +296,7 @@ if __name__ == '__main__':
         assert args.load is not None
         pred = OfflinePredictor(PredictConfig(
             model=Model(),
-            session_init=get_model_loader(args.load),
+            session_init=SmartInit(args.load),
             input_names=['state'],
             output_names=['policy']))
         if args.task == 'play':
@@ -308,4 +309,6 @@ if __name__ == '__main__':
                 get_player(train=False, dumpdir=args.output),
                 pred, args.episode)
     else:
+        assert tf.test.is_gpu_available(), "Training requires GPUs!"
+        logger.set_logger_dir(args.output)
         train()

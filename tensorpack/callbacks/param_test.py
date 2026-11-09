@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import unittest
-import tensorflow as tf
-import six
+from ..compat import tfv1 as tf
 
 from ..utils import logger
 from ..train.trainers import NoOpTrainer
+from ..input_source import DummyConstantInput
 from .param import ScheduledHyperParamSetter, ObjAttrParam
+
+tf.disable_eager_execution()
 
 
 class ParamObject(object):
@@ -37,7 +39,12 @@ class ScheduledHyperParamSetterTest(unittest.TestCase):
     def _create_trainer_with_scheduler(self, scheduler,
                                        steps_per_epoch, max_epoch, starting_epoch=1):
         trainer = NoOpTrainer()
-        tf.get_variable(name='test_var', shape=[])
+        trainer.setup_graph(
+            [tf.TensorSpec([1], name='input')],
+            DummyConstantInput([[1]]),
+            lambda input: tf.reduce_sum(input) + tf.get_variable(name='test_var', shape=[]),
+            lambda: tf.train.GradientDescentOptimizer(0.1)
+        )
         self._param_obj.trainer = trainer
         trainer.train_with_defaults(
             callbacks=[scheduler],
@@ -70,11 +77,17 @@ class ScheduledHyperParamSetterTest(unittest.TestCase):
     def testStartAfterSchedule(self):
         scheduler = ScheduledHyperParamSetter(
             ObjAttrParam(self._param_obj, ParamObject.PARAM_NAME),
-            [(10, 0.3), (20, 0.4), (30, 0.5)])
+            [(10, 0.3), (20, 0.4), (30, 0.5)], set_at_beginning=False)
         history = self._create_trainer_with_scheduler(scheduler, 1, 92, starting_epoch=90)
         self.assertEqual(len(history), 0)
 
-    @unittest.skipIf(six.PY2, "assertLogs not supported in Python 2")
+    def testStartAfterSchedule_SetAtBeginning(self):
+        scheduler = ScheduledHyperParamSetter(
+            ObjAttrParam(self._param_obj, ParamObject.PARAM_NAME),
+            [(10, 0.3), (20, 0.4), (30, 0.5)], set_at_beginning=True)
+        history = self._create_trainer_with_scheduler(scheduler, 1, 92, starting_epoch=90)
+        self.assertEqual(history, {0: 0.5})
+
     def testWarningStartInTheMiddle(self):
         scheduler = ScheduledHyperParamSetter(
             ObjAttrParam(self._param_obj, ParamObject.PARAM_NAME),
@@ -82,7 +95,6 @@ class ScheduledHyperParamSetterTest(unittest.TestCase):
         with self.assertLogs(logger=logger._logger, level='WARNING'):
             self._create_trainer_with_scheduler(scheduler, 1, 21, starting_epoch=20)
 
-    @unittest.skipIf(six.PY2, "unittest.mock not available in Python 2")
     def testNoWarningStartInTheMiddle(self):
         scheduler = ScheduledHyperParamSetter(
             ObjAttrParam(self._param_obj, ParamObject.PARAM_NAME),

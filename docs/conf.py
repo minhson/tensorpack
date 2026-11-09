@@ -15,6 +15,33 @@
 import sys, os, re
 import mock
 import inspect
+from sphinx.domains import Domain
+
+class GithubURLDomain(Domain):
+    """
+    Resolve certain links in markdown files to github source.
+    """
+
+    name = "githuburl"
+    ROOT = "https://github.com/tensorpack/tensorpack/blob/master/"
+
+    def resolve_any_xref(self, env, fromdocname, builder, target, node, contnode):
+        github_url = None
+        if ".html" not in target:
+            if target.startswith("../../") and not target.startswith("../../modules"):
+                url = target.replace("../", "")
+                github_url = url
+
+        if github_url is not None:
+            if github_url.endswith("README"):
+                # bug of recommonmark.
+                # https://github.com/readthedocs/recommonmark/blob/ddd56e7717e9745f11300059e4268e204138a6b1/recommonmark/parser.py#L152-L155
+                github_url += ".md"
+            print("Ref {} resolved to github:{}".format(target, github_url))
+            contnode["refuri"] = self.ROOT + github_url
+            return [("githuburl:any", contnode)]
+        else:
+            return []
 
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
@@ -43,6 +70,9 @@ except ImportError:
     MOCK_MODULES.extend(['tensorflow.python.training.monitored_session'])
     MOCK_MODULES.extend(['tensorflow.python.training'])
     MOCK_MODULES.extend(['tensorflow.python.client'])
+    MOCK_MODULES.extend(['tensorflow.python.framework'])
+    MOCK_MODULES.extend(['tensorflow.python.platform'])
+    MOCK_MODULES.extend(['tensorflow.python.tools'])
     MOCK_MODULES.extend(['tensorflow.contrib.graph_editor'])
 
 for mod_name in MOCK_MODULES:
@@ -55,12 +85,13 @@ import tensorpack
 # -- General configuration ------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
-needs_sphinx = '1.4'
+needs_sphinx = '3.0'
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
+    'recommonmark',
     'sphinx.ext.autodoc',
     'sphinx.ext.todo',
     'sphinx.ext.napoleon',
@@ -83,17 +114,15 @@ if ON_RTD:
 else:
     # skip this when building locally
     intersphinx_timeout = 0.1
-intersphinx_mapping = {'python': ('https://docs.python.org/3.6', None)}
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3.6', None),
+    'numpy': ('https://docs.scipy.org/doc/numpy/', None),
+}
 # -------------------------
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
 
-# to support markdown
-from recommonmark.parser import CommonMarkParser
-source_parsers = {
-    '.md': CommonMarkParser,
-}
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 source_suffix = ['.rst', '.md']
@@ -106,7 +135,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'tensorpack'
-copyright = u'2015 - 2018, Yuxin Wu, et al.'
+copyright = u'2015 - 2020, Yuxin Wu, et al.'
 author = u'Yuxin Wu, et al.'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -374,16 +403,18 @@ _DEPRECATED_NAMES = set([
     'dump_dataflow_to_process_queue',
     'DistributedTrainerReplicated',
     'DistributedTrainerParameterServer',
-    'InputDesc',
-    'inputs_desc',
     'Augmentor',
+    "get_model_loader",
 
     # renamed items that should not appear in docs
+    'load_chkpt_vars',
+    'save_chkpt_vars',
     'DumpTensor',
     'DumpParamAsImage',
     'get_nr_gpu',
     'TrainingMonitor',
     'PeakMemoryTracker',
+    'TowerFuncWrapper',
 
     'PrefetchData',
     'MultiProcessPrefetchData',
@@ -391,17 +422,17 @@ _DEPRECATED_NAMES = set([
     'MultiThreadPrefetchData',
 
     # deprecated or renamed symbolic code
-    'Deconv2D', 'psnr',
+    'Deconv2D',
 
     # shouldn't appear in doc:
     'l2_regularizer', 'l1_regularizer',
 
     # internal only
+    'execute_only_once',
+    'humanize_time_delta',
     'SessionUpdate',
-    'average_grads',
-    'aggregate_grads',
-    'allreduce_grads',
-    'get_checkpoint_path'
+    'get_checkpoint_path',
+    'IterSpeedCounter'
 ])
 
 def autodoc_skip_member(app, what, name, obj, skip, options):
@@ -416,6 +447,7 @@ def autodoc_skip_member(app, what, name, obj, skip, options):
     # Hide some names that are deprecated or not intended to be used
     if name in _DEPRECATED_NAMES:
         return True
+
     if name in ['__iter__', '__len__', 'reset_state', 'get_data', 'size']:
         # skip these methods with empty docstring
         if not obj.__doc__ and inspect.isfunction(obj):
@@ -426,23 +458,14 @@ def autodoc_skip_member(app, what, name, obj, skip, options):
                 return True
     return None
 
-def url_resolver(url):
-    if '.html' not in url:
-        return "https://github.com/tensorpack/tensorpack/blob/master/" + url
-    else:
-        if ON_RTD:
-            return "http://tensorpack.readthedocs.io/" + url
-        else:
-            return '/' + url
-
 def setup(app):
     from recommonmark.transform import AutoStructify
+    app.add_domain(GithubURLDomain)
     app.connect('autodoc-process-signature', process_signature)
     app.connect('autodoc-skip-member', autodoc_skip_member)
     app.add_config_value(
         'recommonmark_config',
-        {'url_resolver': url_resolver,
-         'auto_toc_tree_section': 'Contents',
+        {'auto_toc_tree_section': 'Contents',
          'enable_math': True,
          'enable_inline_math': True,
          'enable_eval_rst': True

@@ -18,11 +18,11 @@ from tensorpack.utils.argtools import log_once
 from modeling.model_rpn import get_all_anchors
 from modeling.model_fpn import get_all_anchors_fpn
 from common import (
-    CustomResize, DataFromListOfDict, box_to_point8,
-    filter_boxes_inside_shape, np_iou, point8_to_box, segmentation_to_mask,
+    CustomResize, DataFromListOfDict, box_to_point4,
+    filter_boxes_inside_shape, np_iou, point4_to_box, polygons_to_mask,
 )
 from config import config as cfg
-from dataset import DatasetRegistry
+from dataset import DatasetRegistry, register_coco
 from utils.np_box_ops import area as np_area
 from utils.np_box_ops import ioa as np_ioa
 
@@ -38,6 +38,7 @@ def print_class_histogram(roidbs):
     Args:
         roidbs (list[dict]): the same format as the output of `training_roidbs`.
     """
+    class_names = DatasetRegistry.get_metadata(cfg.DATA.TRAIN[0], 'class_names')
     # labels are in [1, NUM_CATEGORY], hence +2 for bins
     hist_bins = np.arange(cfg.DATA.NUM_CATEGORY + 2)
 
@@ -47,11 +48,13 @@ def print_class_histogram(roidbs):
         # filter crowd?
         gt_inds = np.where((entry["class"] > 0) & (entry["is_crowd"] == 0))[0]
         gt_classes = entry["class"][gt_inds]
+        if len(gt_classes):
+            assert gt_classes.max() <= len(class_names) - 1
         gt_hist += np.histogram(gt_classes, bins=hist_bins)[0]
-    COL = 6
-    data = list(itertools.chain(*[[cfg.DATA.CLASS_NAMES[i], v] for i, v in enumerate(gt_hist[1:])]))
+    data = list(itertools.chain(*[[class_names[i + 1], v] for i, v in enumerate(gt_hist[1:])]))
+    COL = min(6, len(data))
     total_instances = sum(data[1::2])
-    data.extend([None] * (COL - len(data) % COL))
+    data.extend([None] * ((COL - len(data) % COL) % COL))
     data.extend(["total", total_instances])
     data = itertools.zip_longest(*[data[i::COL] for i in range(COL)])
     # the first line is BG
@@ -83,7 +86,7 @@ class TrainingDataPreprocessor:
         im = im.astype("float32")
         height, width = im.shape[:2]
         # assume floatbox as input
-        assert boxes.dtype == np.float32, "Loader has to return floating point boxes!"
+        assert boxes.dtype == np.float32, "Loader has to return float32 boxes!"
 
         if not self.cfg.DATA.ABSOLUTE_COORD:
             boxes[:, 0::2] *= width
@@ -92,10 +95,12 @@ class TrainingDataPreprocessor:
         # augmentation:
         tfms = self.aug.get_transform(im)
         im = tfms.apply_image(im)
-        points = box_to_point8(boxes)
+        points = box_to_point4(boxes)
         points = tfms.apply_coords(points)
-        boxes = point8_to_box(points)
+        boxes = point4_to_box(points)
         if len(boxes):
+            assert klass.max() <= self.cfg.DATA.NUM_CATEGORY, \
+                "Invalid category {}!".format(klass.max())
             assert np.min(np_area(boxes)) > 0, "Some boxes have zero area!"
 
         ret = {"image": im}
@@ -133,7 +138,7 @@ class TrainingDataPreprocessor:
                 if not self.cfg.DATA.ABSOLUTE_COORD:
                     polys = [p * width_height for p in polys]
                 polys = [tfms.apply_coords(p) for p in polys]
-                masks.append(segmentation_to_mask(polys, im.shape[0], gt_mask_width))
+                masks.append(polygons_to_mask(polys, im.shape[0], gt_mask_width))
 
             if len(masks):
                 masks = np.asarray(masks, dtype='uint8')    # values in {0, 1}
@@ -219,6 +224,7 @@ class TrainingDataPreprocessor:
         all_anchors_flatten = np.concatenate(flatten_anchors_per_level, axis=0)
 
         inside_ind, inside_anchors = filter_boxes_inside_shape(all_anchors_flatten, im.shape[:2])
+
         anchor_labels, anchor_gt_boxes = self.get_anchor_labels(
             inside_anchors, boxes[is_crowd == 0], boxes[is_crowd == 1]
         )
@@ -339,7 +345,8 @@ def get_train_dataflow():
     # Filter out images that have no gt boxes, but this filter shall not be applied for testing.
     # The model does support training with empty images, but it is not useful for COCO.
     num = len(roidbs)
-    roidbs = list(filter(lambda img: len(img["boxes"][img["is_crowd"] == 0]) > 0, roidbs))
+    if cfg.DATA.FILTER_EMPTY_ANNOTATIONS:
+        roidbs = list(filter(lambda img: len(img["boxes"][img["is_crowd"] == 0]) > 0, roidbs))
     logger.info(
         "Filtered {} images which contain no non-crowd groudtruth boxes. Total #images for training: {}".format(
             num - len(roidbs), len(roidbs)
@@ -392,11 +399,12 @@ def get_eval_dataflow(name, shard=0, num_shards=1):
 if __name__ == "__main__":
     import os
     from tensorpack.dataflow import PrintData
+    from config import finalize_configs
 
-    cfg.DATA.BASEDIR = os.path.expanduser("~/data/coco")
+    register_coco(os.path.expanduser("~/data/coco"))
+    finalize_configs()
     ds = get_train_dataflow()
-    ds = PrintData(ds, 100)
+    ds = PrintData(ds, 10)
     TestDataSpeed(ds, 50000).start()
-    ds.reset_state()
-    for k in ds:
+    for _ in ds:
         pass

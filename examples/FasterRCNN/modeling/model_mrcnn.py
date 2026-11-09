@@ -2,9 +2,9 @@
 
 import tensorflow as tf
 
+from tensorpack import tfv1
 from tensorpack.models import Conv2D, Conv2DTranspose, layer_register
 from tensorpack.tfutils.argscope import argscope
-from tensorpack.tfutils.common import get_tf_version_tuple
 from tensorpack.tfutils.scope_utils import under_name_scope
 from tensorpack.tfutils.summary import add_moving_summary
 
@@ -20,9 +20,10 @@ def maskrcnn_loss(mask_logits, fg_labels, fg_target_masks):
         fg_labels: #fg, in 1~#class, int64
         fg_target_masks: #fgxhxw, float32
     """
-    num_fg = tf.size(fg_labels, out_type=tf.int64)
-    indices = tf.stack([tf.range(num_fg), fg_labels - 1], axis=1)  # #fgx2
-    mask_logits = tf.gather_nd(mask_logits, indices)  # #fgxhxw
+    mask_logits = tf.gather(
+        mask_logits, tf.reshape(fg_labels - 1, [-1, 1]), batch_dims=1)
+    mask_logits = tf.squeeze(mask_logits, axis=1)
+
     mask_probs = tf.sigmoid(mask_logits)
 
     # add some training visualizations to tensorboard
@@ -66,16 +67,16 @@ def maskrcnn_upXconv_head(feature, num_category, num_convs, norm=None):
     assert norm in [None, 'GN'], norm
     l = feature
     with argscope([Conv2D, Conv2DTranspose], data_format='channels_first',
-                  kernel_initializer=tf.variance_scaling_initializer(
+                  kernel_initializer=tfv1.variance_scaling_initializer(
                       scale=2.0, mode='fan_out',
-                      distribution='untruncated_normal' if get_tf_version_tuple() >= (1, 12) else 'normal')):
+                      distribution='untruncated_normal')):
         # c2's MSRAFill is fan_out
         for k in range(num_convs):
             l = Conv2D('fcn{}'.format(k), l, cfg.MRCNN.HEAD_DIM, 3, activation=tf.nn.relu)
             if norm is not None:
                 l = GroupNorm('gn{}'.format(k), l)
         l = Conv2DTranspose('deconv', l, cfg.MRCNN.HEAD_DIM, 2, strides=2, activation=tf.nn.relu)
-        l = Conv2D('conv', l, num_category, 1)
+        l = Conv2D('conv', l, num_category, 1, kernel_initializer=tf.random_normal_initializer(stddev=0.001))
     return l
 
 

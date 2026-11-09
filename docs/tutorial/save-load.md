@@ -14,19 +14,19 @@ Tensorpack also provides a small tool to load checkpoints, see
 [load_chkpt_vars](../modules/tfutils.html#tensorpack.tfutils.varmanip.load_chkpt_vars)
 for details.
 
-[scripts/ls-checkpoint.py](../scripts/ls-checkpoint.py)
+[scripts/ls-checkpoint.py](../../scripts/ls-checkpoint.py)
 demos how to print all variables and their shapes in a checkpoint.
 
 Tensorpack includes another tool to save variables to TF checkpoint, see
 [save_chkpt_vars](../modules/tfutils.html#tensorpack.tfutils.varmanip.save_chkpt_vars).
 
-## Work with npz Files in Model Zoo
+## Work with .npz Files in the Model Zoo
 
 Most models provided by tensorpack are in npz (dictionary) format,
-because it's easy to manipulate without TF dependency.
+because it's easy to use without TF dependency.
 You can read/write them with `np.load` and `np.savez`.
 
-[scripts/dump-model-params.py](../scripts/dump-model-params.py) can be used to remove unnecessary variables in a checkpoint
+[scripts/dump-model-params.py](../../scripts/dump-model-params.py) can be used to remove unnecessary variables in a checkpoint
 and save results to a npz.
 It takes a metagraph file (which is also saved by `ModelSaver`) and only saves variables that the model needs at inference time.
 It dumps the model to a `var-name: value` dict saved in npz format.
@@ -34,27 +34,33 @@ It dumps the model to a `var-name: value` dict saved in npz format.
 ## Load a Model to a Session
 
 Model loading (in both training and inference) is through the `session_init` interface.
-For training, use `session_init` in `TrainConfig` or `Trainer.train()`.
-For inference, use `session_init` in `PredictConfig`.
+For training, use `session_init` in `TrainConfig(...)` or `Trainer.train(...)`.
+For inference, use `session_init` in `PredictConfig(...)`.
 
-There are two ways a session can be initialized:
-[session_init=SaverRestore(...)](../modules/tfutils.html#tensorpack.tfutils.sessinit.SaverRestore)
-which restores a TF checkpoint,
-or [session_init=DictRestore(...)](../modules/tfutils.html#tensorpack.tfutils.sessinit.DictRestore) which restores a dict.
-`DictRestore` is the most general loader because you can make arbitrary changes
-you need (e.g., remove variables, rename variables) to the dict.
+There are a few ways a session can be initialized:
+```
+session_init=SmartInit("path/to/checkpoint")  # load a TF checkpoint
+session_init=SmartInit("path/to/model_zoo.npz")  # load tensorpack model zoo
+session_init=SmartInit(dict_of_parameters)  # load a dictionary
+session_init=SmartInit(["path1", dict2])  # load them sequentially
+```
 
-To load multiple models, use [ChainInit](../modules/tfutils.html#tensorpack.tfutils.sessinit.ChainInit).
+[SmartInit](../modules/tfutils.html#tensorpack.tfutils.sessinit.SmartInit)
+is in fact a small helper which uses some heuristics to return you one of
+[SaverRestore](../modules/tfutils.html#tensorpack.tfutils.sessinit.SaverRestore) or
+[DictRestore](../modules/tfutils.html#tensorpack.tfutils.sessinit.DictRestore).
+They are responsible for the actual initialization work.
 
-To load an npz file from tensorpack model zoo to a session, you can use `DictRestore(dict(np.load(filename)))`.
-You can also use
-[get_model_loader(filename)](../modules/tfutils.html#tensorpack.tfutils.sessinit.get_model_loader),
-a small helper which returns either a `SaverRestore` or a `DictRestore` based on the file name.
+Whatever you use in `session_init`, this is what happens during the initialization:
 
-Variable restoring is completely based on __exact name match__ between
-variables in the current graph and variables in the `session_init` initializer.
-Variables that appear in only one side will be printed as warning.
-Variables of the same name but incompatible shapes will cause error.
+* Variable restoring is completely based on __exact name match__ between
+	variables in the current graph and variables in the `session_init` initializer.
+* Variables that appear in only one side will be printed as warning.
+* Variables of the same name but incompatible shapes will cause exceptions.
+  If you set `ignore_mismatch=True`, then such errors will only be printed as warnings.
+
+You can also use `SmartInit` to load a model to a session manually,
+without involving the rest of the tensorpack, by `SmartInit(...).init(session)`.
 
 ## Transfer Learning
 

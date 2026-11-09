@@ -80,11 +80,11 @@ You can overwrite any of the following methods in the new callback:
   ```
 
   The training loops would become equivalent to `sess.run([training_op, my_op])`.
-  
+
   However, if you write `my_op.run()` in `_trigger_step`, the training loop would become
   `sess.run(training_op); sess.run(my_op);`.
   Usually the difference matters, please choose carefully.
-  
+
   If you want to run ops that depend on your inputs, it's better to run it
   __along with__ the training iteration, to avoid wasting a datapoint and avoid
   messing up hooks of the `InputSource`.
@@ -114,7 +114,7 @@ You can overwrite any of the following methods in the new callback:
 * Access the current graph and session by `self.trainer.graph` and
   `self.trainer.sess`, `self.trainer.hooked_sess`.
   Note that calling `(hooked_)sess.run` to evaluate tensors may have unexpected
-  effect in certain scenarios. 
+  effect in certain scenarios.
   In general, use `sess.run` to evaluate tensors that do not depend on the inputs.
   And use `_{before,after}_run` to evaluate tensors together with inputs if the
   tensors depend on the inputs.
@@ -141,5 +141,11 @@ You can overwrite any of the following methods in the new callback:
 
 ### Examples
 
-Check source code of the [existing tensorpack callbacks](../../modules/callbacks.html). 
-Or grep 'Callback' in tensorpack examples for those implemented as extensions.
+The builtin callbacks listed in [API docs](../../modules/callbacks.md) and callbacks in tensorpack examples are
+great examples to learn how to write a callback.
+
+Custom callbacks in tensorpack examples can be found by `ack Callback` in the example directory.
+Some interesting ones are:
+* Run inference during training with a predictor:
+  [CycleGAN](../../../examples/GAN/CycleGAN.py), [RCNN](../../../examples/FasterRCNN/eval.py)
+* Run some ops to modify weights during training: [WGAN](../../../examples/GAN/WGAN.py), [MOCO](https://github.com/ppwwyyxx/moco.tensorflow/blob/master/main_moco.py)

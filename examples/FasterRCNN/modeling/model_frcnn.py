@@ -3,9 +3,9 @@
 
 import tensorflow as tf
 
+from tensorpack import tfv1
 from tensorpack.models import Conv2D, FullyConnected, layer_register
 from tensorpack.tfutils.argscope import argscope
-from tensorpack.tfutils.common import get_tf_version_tuple
 from tensorpack.tfutils.scope_utils import under_name_scope
 from tensorpack.tfutils.summary import add_moving_summary
 from tensorpack.utils.argtools import memoized_method
@@ -32,7 +32,7 @@ def proposal_metrics(iou):
     with tf.device('/cpu:0'):
         for th in [0.3, 0.5]:
             recall = tf.truediv(
-                tf.count_nonzero(best_iou >= th),
+                tfv1.count_nonzero(best_iou >= th),
                 tf.size(best_iou, out_type=tf.int64),
                 name='recall_iou{}'.format(th))
             summaries.append(recall)
@@ -68,19 +68,19 @@ def sample_fast_rcnn_targets(boxes, gt_boxes, gt_labels):
     def sample_fg_bg(iou):
         fg_mask = tf.cond(tf.shape(iou)[1] > 0,
                           lambda: tf.reduce_max(iou, axis=1) >= cfg.FRCNN.FG_THRESH,
-                          lambda: tf.zeros([tf.shape(iou)[0]], dtype=tf.bool))
+                          lambda: tf.zeros(tf.shape(iou)[0], dtype=tf.bool))
 
         fg_inds = tf.reshape(tf.where(fg_mask), [-1])
         num_fg = tf.minimum(int(
             cfg.FRCNN.BATCH_PER_IM * cfg.FRCNN.FG_RATIO),
             tf.size(fg_inds), name='num_fg')
-        fg_inds = tf.random_shuffle(fg_inds)[:num_fg]
+        fg_inds = tf.random.shuffle(fg_inds)[:num_fg]
 
         bg_inds = tf.reshape(tf.where(tf.logical_not(fg_mask)), [-1])
         num_bg = tf.minimum(
             cfg.FRCNN.BATCH_PER_IM - num_fg,
             tf.size(bg_inds), name='num_bg')
-        bg_inds = tf.random_shuffle(bg_inds)[:num_bg]
+        bg_inds = tf.random.shuffle(bg_inds)[:num_bg]
 
         add_moving_summary(num_fg, num_bg)
         return fg_inds, bg_inds
@@ -90,7 +90,7 @@ def sample_fast_rcnn_targets(boxes, gt_boxes, gt_labels):
 
     best_iou_ind = tf.cond(tf.shape(iou)[1] > 0,
                            lambda: tf.argmax(iou, axis=1),   # #proposal, each in 0~m-1
-                           lambda: tf.zeros([tf.shape(iou)[0]], dtype=tf.int64))
+                           lambda: tf.zeros(tf.shape(iou)[0], dtype=tf.int64))
     fg_inds_wrt_gt = tf.gather(best_iou_ind, fg_inds)   # num_fg
 
     all_indices = tf.concat([fg_inds, bg_inds], axis=0)   # indices w.r.t all n+m proposal boxes
@@ -151,11 +151,9 @@ def fastrcnn_losses(labels, label_logits, fg_boxes, fg_box_logits):
     num_fg = tf.size(fg_inds, out_type=tf.int64)
     empty_fg = tf.equal(num_fg, 0)
     if int(fg_box_logits.shape[1]) > 1:
-        indices = tf.stack(
-            [tf.range(num_fg), fg_labels], axis=1)  # #fgx2
-        fg_box_logits = tf.gather_nd(fg_box_logits, indices)
-    else:
-        fg_box_logits = tf.reshape(fg_box_logits, [-1, 4])
+        fg_labels = tf.expand_dims(fg_labels, axis=1)  # nfg x 1
+        fg_box_logits = tf.gather(fg_box_logits, fg_labels, batch_dims=1)
+    fg_box_logits = tf.reshape(fg_box_logits, [-1, 4])  # nfg x 4
 
     with tf.name_scope('label_metrics'), tf.device('/cpu:0'):
         prediction = tf.argmax(label_logits, axis=1, name='label_prediction')
@@ -195,59 +193,21 @@ def fastrcnn_predictions(boxes, scores):
     boxes = tf.transpose(boxes, [1, 0, 2])[1:, :, :]  # #catxnx4
     scores = tf.transpose(scores[:, 1:], [1, 0])  # #catxn
 
-    def f(X):
-        """
-        prob: n probabilities
-        box: nx4 boxes
-
-        Returns: n boolean, the selection
-        """
-        prob, box = X
-        output_shape = tf.shape(prob, out_type=tf.int64)
-        # filter by score threshold
-        ids = tf.reshape(tf.where(prob > cfg.TEST.RESULT_SCORE_THRESH), [-1])
-        prob = tf.gather(prob, ids)
-        box = tf.gather(box, ids)
-        # NMS within each class
-        selection = tf.image.non_max_suppression(
-            box, prob, cfg.TEST.RESULTS_PER_IM, cfg.TEST.FRCNN_NMS_THRESH)
-        selection = tf.gather(ids, selection)
-
-        if get_tf_version_tuple() >= (1, 13):
-            sorted_selection = tf.sort(selection, direction='ASCENDING')
-            mask = tf.sparse.SparseTensor(indices=tf.expand_dims(sorted_selection, 1),
-                                          values=tf.ones_like(sorted_selection, dtype=tf.bool),
-                                          dense_shape=output_shape)
-            mask = tf.sparse.to_dense(mask, default_value=False)
-        else:
-            # this function is deprecated by TF
-            sorted_selection = -tf.nn.top_k(-selection, k=tf.size(selection))[0]
-            mask = tf.sparse_to_dense(
-                sparse_indices=sorted_selection,
-                output_shape=output_shape,
-                sparse_values=True,
-                default_value=False)
-        return mask
-
-    # TF bug in version 1.11, 1.12: https://github.com/tensorflow/tensorflow/issues/22750
-    buggy_tf = get_tf_version_tuple() in [(1, 11), (1, 12)]
-    masks = tf.map_fn(f, (scores, boxes), dtype=tf.bool,
-                      parallel_iterations=1 if buggy_tf else 10)     # #cat x N
-    selected_indices = tf.where(masks)  # #selection x 2, each is (cat_id, box_id)
-    scores = tf.boolean_mask(scores, masks)
-
-    # filter again by sorting scores
-    topk_scores, topk_indices = tf.nn.top_k(
-        scores,
-        tf.minimum(cfg.TEST.RESULTS_PER_IM, tf.size(scores)),
-        sorted=False)
-    filtered_selection = tf.gather(selected_indices, topk_indices)
-    cat_ids, box_ids = tf.unstack(filtered_selection, axis=1)
-
-    final_scores = tf.identity(topk_scores, name='scores')
-    final_labels = tf.add(cat_ids, 1, name='labels')
-    final_ids = tf.stack([cat_ids, box_ids], axis=1, name='all_ids')
-    final_boxes = tf.gather_nd(boxes, final_ids, name='boxes')
+    max_coord = tf.reduce_max(boxes)
+    filtered_ids = tf.where(scores > cfg.TEST.RESULT_SCORE_THRESH)  # Fx2
+    filtered_boxes = tf.gather_nd(boxes, filtered_ids)  # Fx4
+    filtered_scores = tf.gather_nd(scores, filtered_ids)  # F,
+    cls_per_box = tf.slice(filtered_ids, [0, 0], [-1, 1])
+    offsets = tf.cast(cls_per_box, tf.float32) * (max_coord + 1)  # F,1
+    nms_boxes = filtered_boxes + offsets
+    selection = tf.image.non_max_suppression(
+        nms_boxes,
+        filtered_scores,
+        cfg.TEST.RESULTS_PER_IM,
+        cfg.TEST.FRCNN_NMS_THRESH)
+    final_scores = tf.gather(filtered_scores, selection, name='scores')
+    final_labels = tf.add(tf.gather(cls_per_box[:, 0], selection), 1, name='labels')
+    final_boxes = tf.gather(filtered_boxes, selection, name='boxes')
     return final_boxes, final_scores, final_labels
 
 
@@ -266,7 +226,7 @@ def fastrcnn_2fc_head(feature):
         2D head feature
     """
     dim = cfg.FPN.FRCNN_FC_HEAD_DIM
-    init = tf.variance_scaling_initializer()
+    init = tfv1.variance_scaling_initializer()
     hidden = FullyConnected('fc6', feature, dim, kernel_initializer=init, activation=tf.nn.relu)
     hidden = FullyConnected('fc7', hidden, dim, kernel_initializer=init, activation=tf.nn.relu)
     return hidden
@@ -287,15 +247,15 @@ def fastrcnn_Xconv1fc_head(feature, num_convs, norm=None):
     assert norm in [None, 'GN'], norm
     l = feature
     with argscope(Conv2D, data_format='channels_first',
-                  kernel_initializer=tf.variance_scaling_initializer(
+                  kernel_initializer=tfv1.variance_scaling_initializer(
                       scale=2.0, mode='fan_out',
-                      distribution='untruncated_normal' if get_tf_version_tuple() >= (1, 12) else 'normal')):
+                      distribution='untruncated_normal')):
         for k in range(num_convs):
             l = Conv2D('conv{}'.format(k), l, cfg.FPN.FRCNN_CONV_HEAD_DIM, 3, activation=tf.nn.relu)
             if norm is not None:
                 l = GroupNorm('gn{}'.format(k), l)
         l = FullyConnected('fc', l, cfg.FPN.FRCNN_FC_HEAD_DIM,
-                           kernel_initializer=tf.variance_scaling_initializer(), activation=tf.nn.relu)
+                           kernel_initializer=tfv1.variance_scaling_initializer(), activation=tf.nn.relu)
     return l
 
 

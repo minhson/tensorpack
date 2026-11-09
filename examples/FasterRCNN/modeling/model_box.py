@@ -74,7 +74,7 @@ def encode_bbox_target(boxes, anchors):
 
     # Note that here not all boxes are valid. Some may be zero
     txty = (xbyb - xaya) / waha
-    twth = tf.log(wbhb / waha)  # may contain -inf for invalid boxes
+    twth = tf.math.log(wbhb / waha)  # may contain -inf for invalid boxes
     encoded = tf.concat([txty, twth], axis=1)  # (-1x2x2)
     return tf.reshape(encoded, tf.shape(boxes))
 
@@ -134,16 +134,8 @@ def crop_and_resize(image, boxes, box_ind, crop_size, pad_border=True):
 
         return tf.concat([ny0, nx0, ny0 + nh, nx0 + nw], axis=1)
 
-    # Expand bbox to a minium size of 1
-    # boxes_x1y1, boxes_x2y2 = tf.split(boxes, 2, axis=1)
-    # boxes_wh = boxes_x2y2 - boxes_x1y1
-    # boxes_center = tf.reshape((boxes_x2y2 + boxes_x1y1) * 0.5, [-1, 2])
-    # boxes_newwh = tf.maximum(boxes_wh, 1.)
-    # boxes_x1y1new = boxes_center - boxes_newwh * 0.5
-    # boxes_x2y2new = boxes_center + boxes_newwh * 0.5
-    # boxes = tf.concat([boxes_x1y1new, boxes_x2y2new], axis=1)
-
     image_shape = tf.shape(image)[2:]
+
     boxes = transform_fpcoor_for_tf(boxes, image_shape, [crop_size, crop_size])
     image = tf.transpose(image, [0, 2, 3, 1])   # nhwc
     ret = tf.image.crop_and_resize(
@@ -167,9 +159,13 @@ def roi_align(featuremap, boxes, resolution):
     # sample 4 locations per roi bin
     ret = crop_and_resize(
         featuremap, boxes,
-        tf.zeros([tf.shape(boxes)[0]], dtype=tf.int32),
+        tf.zeros(tf.shape(boxes)[0], dtype=tf.int32),
         resolution * 2)
-    ret = tf.nn.avg_pool(ret, [1, 1, 2, 2], [1, 1, 2, 2], padding='SAME', data_format='NCHW')
+    try:
+        avgpool = tf.nn.avg_pool2d
+    except AttributeError:
+        avgpool = tf.nn.avg_pool
+    ret = avgpool(ret, [1, 1, 2, 2], [1, 1, 2, 2], padding='SAME', data_format='NCHW')
     return ret
 
 

@@ -1,11 +1,10 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 # File: inception-bn.py
 # Author: Yuxin Wu
 
 import argparse
 import os
-import tensorflow as tf
+from tensorpack import tfv1 as tf
 
 from tensorpack import *
 from tensorpack.dataflow import dataset
@@ -166,8 +165,7 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     config = get_config()
-    if args.load:
-        config.session_init = SaverRestore(args.load)
+    config.session_init = SmartInit(args.load)
     nr_tower = get_num_gpu()
     assert nr_tower == NUM_GPU
     launch_train_with_config(config, SyncMultiGPUTrainer(NUM_GPU))

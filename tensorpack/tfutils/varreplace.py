@@ -4,6 +4,7 @@
 
 from contextlib import contextmanager
 
+from ..utils import logger
 from ..compat import tfv1 as tf
 from .common import get_tf_version_tuple
 
@@ -95,8 +96,8 @@ def freeze_variables(stop_gradient=True, skip_collection=False):
         1. If a variable is created, or reused outside of the context, it can still contribute to the
            gradient of other tensors.
         2. If a freezed variable is accessed by other approaches (e.g., by names, by collections),
-          it can still contribute to the gradient of other tensors.
-          For example, weight decay cannot be stopped by a `stop_gradient` context.
+           it can still contribute to the gradient of other tensors.
+           For example, weight decay cannot be stopped by a `stop_gradient` context.
 
     `skip_collection` has to be used the first time the variable is created.
     Once `skip_collection` is used, the variable is not a trainable variable anymore,
@@ -110,8 +111,18 @@ def freeze_variables(stop_gradient=True, skip_collection=False):
         if skip_collection:
             kwargs['trainable'] = False
         v = getter(*args, **kwargs)
-        if skip_collection:
-            tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, v)
+        # do not perform unnecessary changes if it's not originally trainable
+        # otherwise the variable may get added to MODEL_VARIABLES twice
+        if trainable and skip_collection:
+            if isinstance(v, tf.Variable):
+                tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, v)
+            else:
+                logger.warning("""
+[freeze_variables] variable getter did not return a Variable, but '{}' instead, likely due to
+another custom getter. freeze_variables() work only if the other custom getter respects the
+`trainable` argument and don't put variables with `trainable=False` into TRAINABLE_VARIABLES
+collection. Please double check if this is true for the custom getter.
+""".format(str(v)).replace("\n", ""))
         if trainable and stop_gradient:
             v = tf.stop_gradient(v, name='freezed_' + name)
         return v

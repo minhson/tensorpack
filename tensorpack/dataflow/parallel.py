@@ -2,7 +2,9 @@
 # File: parallel.py
 
 import atexit
+import pickle
 import errno
+import traceback
 import itertools
 import multiprocessing as mp
 import os
@@ -14,10 +16,9 @@ import zmq
 from six.moves import queue, range
 
 from ..utils import logger
-from ..utils.develop import log_deprecated
 from ..utils.concurrency import (
     StoppableThread, enable_death_signal, ensure_proc_terminate, start_proc_mask_signal)
-from ..utils.serialize import dumps, loads
+from ..utils.serialize import dumps_once as dumps, loads_once as loads
 from .base import DataFlow, DataFlowReentrantGuard, DataFlowTerminated, ProxyDataFlow
 
 __all__ = ['PrefetchData', 'MultiProcessPrefetchData',
@@ -25,10 +26,28 @@ __all__ = ['PrefetchData', 'MultiProcessPrefetchData',
            'PrefetchDataZMQ', 'MultiThreadPrefetchData']
 
 
+# from https://github.com/pytorch/pytorch/blob/master/torch/utils/data/_utils/__init__.py
+class _ExceptionWrapper:
+    MAGIC = b"EXC_MAGIC"
+    """Wraps an exception plus traceback to communicate across threads"""
+    def __init__(self, exc_info):
+        # It is important that we don't store exc_info, see
+        # NOTE [ Python Traceback Reference Cycle Problem ]
+        self.exc_type = exc_info[0]
+        self.exc_msg = "".join(traceback.format_exception(*exc_info))
+
+    def pack(self):
+        return self.MAGIC + pickle.dumps(self)
+
+    @staticmethod
+    def unpack(dp):
+        if isinstance(dp, bytes) and dp.startswith(_ExceptionWrapper.MAGIC):
+            return pickle.loads(dp[len(_ExceptionWrapper.MAGIC):])
+
+
 def _repeat_iter(get_itr):
     while True:
-        for x in get_itr():
-            yield x
+        yield from get_itr()
 
 
 def _bind_guard(sock, name):
@@ -173,24 +192,14 @@ class MultiProcessRunner(ProxyDataFlow):
                 for dp in self.ds:
                     self.queue.put(dp)
 
-    def __init__(self, ds, num_prefetch=None, num_proc=None, nr_prefetch=None, nr_proc=None):
+    def __init__(self, ds, num_prefetch, num_proc):
         """
         Args:
             ds (DataFlow): input DataFlow.
             num_prefetch (int): size of the queue to hold prefetched datapoints.
                 Required.
             num_proc (int): number of processes to use. Required.
-            nr_prefetch, nr_proc: deprecated argument names
         """
-        if nr_prefetch is not None:
-            log_deprecated("MultiProcessRunner(nr_prefetch)", "Renamed to 'num_prefetch'", "2020-01-01")
-            num_prefetch = nr_prefetch
-        if nr_proc is not None:
-            log_deprecated("MultiProcessRunner(nr_proc)", "Renamed to 'num_proc'", "2020-01-01")
-            num_proc = nr_proc
-        if num_prefetch is None or num_proc is None:
-            raise TypeError("Missing argument num_prefetch or num_proc in MultiProcessRunner!")
-
         # https://docs.python.org/3.6/library/multiprocessing.html?highlight=process#the-spawn-and-forkserver-start-methods
         if os.name == 'nt':
             logger.warn("MultiProcessRunner does support Windows. \
@@ -214,7 +223,7 @@ lead of failure on some of the code.")
         self.procs = [MultiProcessRunner._Worker(self.ds, self.queue, idx)
                       for idx in range(self.num_proc)]
         ensure_proc_terminate(self.procs)
-        start_proc_mask_signal(self.procs)
+        self._reset_done = False
 
     def __iter__(self):
         for k in itertools.count():
@@ -224,8 +233,9 @@ lead of failure on some of the code.")
             yield dp
 
     def reset_state(self):
-        # do nothing. all ds are reset once and only once in spawned processes
-        pass
+        assert not self._reset_done, "reset_state() was called twice! This violates the API of DataFlow!"
+        self._reset_done = True
+        start_proc_mask_signal(self.procs)
 
 
 class MultiProcessRunnerZMQ(_MultiProcessZMQDataFlow):
@@ -291,14 +301,21 @@ class MultiProcessRunnerZMQ(_MultiProcessZMQDataFlow):
         def run(self):
             enable_death_signal(_warn=self.idx == 0)
             self.ds.reset_state()
+            itr = _repeat_iter(lambda: self.ds)
+
             context = zmq.Context()
             socket = context.socket(zmq.PUSH)
             socket.set_hwm(self.hwm)
             socket.connect(self.conn_name)
             try:
                 while True:
-                    for dp in self.ds:
+                    try:
+                        dp = next(itr)
                         socket.send(dumps(dp), copy=False)
+                    except Exception:
+                        dp = _ExceptionWrapper(sys.exc_info()).pack()
+                        socket.send(dumps(dp), copy=False)
+                        raise
             # sigint could still propagate here, e.g. when nested
             except KeyboardInterrupt:
                 pass
@@ -306,17 +323,13 @@ class MultiProcessRunnerZMQ(_MultiProcessZMQDataFlow):
                 socket.close(0)
                 context.destroy(0)
 
-    def __init__(self, ds, num_proc=1, hwm=50, nr_proc=None):
+    def __init__(self, ds, num_proc=1, hwm=50):
         """
         Args:
             ds (DataFlow): input DataFlow.
             num_proc (int): number of processes to use.
             hwm (int): the zmq "high-water mark" (queue size) for both sender and receiver.
-            nr_proc: deprecated
         """
-        if nr_proc is not None:
-            log_deprecated("MultiProcessRunnerZMQ(nr_proc)", "Renamed to 'num_proc'", "2020-01-01")
-            num_proc = nr_proc
         super(MultiProcessRunnerZMQ, self).__init__()
 
         self.ds = ds
@@ -332,7 +345,12 @@ class MultiProcessRunnerZMQ(_MultiProcessZMQDataFlow):
             self._size = -1
 
     def _recv(self):
-        return loads(self.socket.recv(copy=False))
+        ret = loads(self.socket.recv(copy=False))
+        exc = _ExceptionWrapper.unpack(ret)
+        if exc is not None:
+            logger.error("Exception '{}' in worker:".format(str(exc.exc_type)))
+            raise exc.exc_type(exc.exc_msg)
+        return ret
 
     def __len__(self):
         return self.ds.__len__()
@@ -411,7 +429,7 @@ class MultiThreadRunner(DataFlow):
             finally:
                 self.stop()
 
-    def __init__(self, get_df, num_prefetch=None, num_thread=None, nr_prefetch=None, nr_thread=None):
+    def __init__(self, get_df, num_prefetch, num_thread):
         """
         Args:
             get_df ( -> DataFlow): a callable which returns a DataFlow.
@@ -420,17 +438,7 @@ class MultiThreadRunner(DataFlow):
                 unless your dataflow is stateless.
             num_prefetch (int): size of the queue
             num_thread (int): number of threads
-            nr_prefetch, nr_thread: deprecated names
         """
-        if nr_prefetch is not None:
-            log_deprecated("MultiThreadRunner(nr_prefetch)", "Renamed to 'num_prefetch'", "2020-01-01")
-            num_prefetch = nr_prefetch
-        if nr_thread is not None:
-            log_deprecated("MultiThreadRunner(nr_thread)", "Renamed to 'num_thread'", "2020-01-01")
-            num_thread = nr_thread
-        if num_prefetch is None or num_thread is None:
-            raise TypeError("Missing argument num_prefetch or num_thread in MultiThreadRunner!")
-
         assert num_thread > 0, num_thread
         assert num_prefetch > 0, num_prefetch
         self.num_thread = num_thread

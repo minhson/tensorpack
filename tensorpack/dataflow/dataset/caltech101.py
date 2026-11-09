@@ -3,7 +3,6 @@
 
 
 import os
-from six.moves import range
 
 from ...utils import logger
 from ...utils.fs import download, get_dataset_path
@@ -83,7 +82,7 @@ except ImportError:
 if __name__ == "__main__":
     ds = Caltech101Silhouettes("train")
     ds.reset_state()
-    for (img, label) in ds:
+    for _ in ds:
         from IPython import embed
 
         embed()

@@ -7,7 +7,6 @@ import argparse
 import numpy as np
 import os
 import tensorflow as tf
-from six.moves import map, zip
 
 from tensorpack import *
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
@@ -211,5 +210,5 @@ if __name__ == '__main__':
         callbacks=[ModelSaver()],
         steps_per_epoch=300,
         max_epoch=250,
-        session_init=SaverRestore(args.load) if args.load else None
+        session_init=SmartInit(args.load),
     )

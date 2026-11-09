@@ -2,7 +2,6 @@
 # File: viz.py
 
 import numpy as np
-from six.moves import zip
 
 from tensorpack.utils import viz
 from tensorpack.utils.palette import PALETTE_RGB
@@ -10,9 +9,10 @@ from tensorpack.utils.palette import PALETTE_RGB
 from config import config as cfg
 from utils.np_box_ops import area as np_area
 from utils.np_box_ops import iou as np_iou
+from common import polygons_to_mask
 
 
-def draw_annotation(img, boxes, klass, is_crowd=None):
+def draw_annotation(img, boxes, klass, polygons=None, is_crowd=None):
     """Will not modify img"""
     labels = []
     assert len(boxes) == len(klass)
@@ -27,6 +27,11 @@ def draw_annotation(img, boxes, klass, is_crowd=None):
         for cls in klass:
             labels.append(cfg.DATA.CLASS_NAMES[cls])
     img = viz.draw_boxes(img, boxes, labels)
+
+    if polygons is not None:
+        for p in polygons:
+            mask = polygons_to_mask(p, img.shape[0], img.shape[1])
+            img = draw_mask(img, mask)
     return img
 
 
@@ -91,6 +96,31 @@ def draw_final_outputs(img, results):
     return ret
 
 
+def draw_final_outputs_blackwhite(img, results):
+    """
+    Args:
+        results: [DetectionResult]
+    """
+    img_bw = img.mean(axis=2)
+    img_bw = np.stack([img_bw] * 3, axis=2)
+
+    if len(results) == 0:
+        return img_bw
+
+    boxes = np.asarray([r.box for r in results])
+
+    all_masks = [r.mask for r in results]
+    if all_masks[0] is not None:
+        m = all_masks[0] > 0
+        for m2 in all_masks[1:]:
+            m = m | (m2 > 0)
+        img_bw[m] = img[m]
+
+    tags = ["{},{:.2f}".format(cfg.DATA.CLASS_NAMES[r.class_id], r.score) for r in results]
+    ret = viz.draw_boxes(img_bw, boxes, tags)
+    return ret
+
+
 def draw_mask(im, mask, alpha=0.5, color=None):
     """
     Overlay a mask on top of the image.
@@ -102,6 +132,7 @@ def draw_mask(im, mask, alpha=0.5, color=None):
     """
     if color is None:
         color = PALETTE_RGB[np.random.choice(len(PALETTE_RGB))][::-1]
+    color = np.asarray(color, dtype=np.float32)
     im = np.where(np.repeat((mask > 0)[:, :, None], 3, axis=2),
                   im * (1 - alpha) + color * alpha, im)
     im = im.astype('uint8')

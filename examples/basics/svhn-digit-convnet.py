@@ -1,12 +1,9 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# File: svhn-digit-convnet.py
 # Author: Yuxin Wu
 
 import argparse
 import os
-import tensorflow as tf
-
+from tensorpack import tfv1 as tf
 from tensorpack import *
 from tensorpack.dataflow import dataset
 from tensorpack.tfutils.summary import *
@@ -107,6 +104,6 @@ if __name__ == '__main__':
                             ScalarStats(['cost', 'accuracy']))
         ],
         max_epoch=350,
-        session_init=SaverRestore(args.load) if args.load else None
+        session_init=SmartInit(args.load)
     )
     launch_train_with_config(config, SimpleTrainer())

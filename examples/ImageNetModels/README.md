@@ -1,10 +1,11 @@
+![badge](https://img.shields.io/badge/compatible%20with-TF2-orange)
 
 ImageNet training code of ResNet, ShuffleNet, DoReFa-Net, AlexNet, Inception, VGG with tensorpack.
 
 To train any of the models, just do `./{model}.py --data /path/to/ilsvrc`.
 More options are available in `./{model}.py --help`.
 Expected format of data directory is described in [docs](http://tensorpack.readthedocs.io/modules/dataflow.dataset.html#tensorpack.dataflow.dataset.ILSVRC12).
-Some pretrained models can be downloaded at [tensorpack model zoo](http://models.tensorpack.com/).
+Some pretrained models can be downloaded at [tensorpack model zoo](http://models.tensorpack.com/#ImageNetModels).
 
 ### ShuffleNet
 
@@ -43,15 +44,15 @@ See `./alexnet.py --help` for usage.
 
 This VGG16 script, when trained with 8 GPUs and 32 batch size per GPU, reaches the following
 validation error after 100 epochs (30h with 8 P100s). This reproduces the VGG
-experiments in the paper [Group Normalization](https://arxiv.org/abs/1803.08494).
+experiments in the paper [Group Normalization](https://arxiv.org/abs/1803.08494)
+(more code about this paper can be found at [GroupNorm-reproduce](https://github.com/ppwwyyxx/GroupNorm-reproduce)).
+
 See `./vgg16.py --help` for usage.
 
  | No Normalization                          | Batch Normalization | Group Normalization |
  |:------------------------------------------|:-------------------:|:-------------------:|
  | 29~30% (large variation with random seed) | 28%                 | 27.6%               |
 
-Note that the purpose of this experiment in the paper is not to claim GroupNorm
-has better performance than BatchNorm.
 
 ### Inception-BN
 

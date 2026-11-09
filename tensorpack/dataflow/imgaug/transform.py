@@ -15,7 +15,8 @@ Legacy alias. Please don't use.
 # This legacy augmentor requires us to import base from here, causing circular dependency.
 # Should remove this in the future.
 
-__all__ = ["Transform", "ResizeTransform", "CropTransform", "FlipTransform", "TransformList", "TransformFactory"]
+__all__ = ["Transform", "ResizeTransform", "CropTransform", "FlipTransform",
+           "TransformList", "TransformFactory"]
 
 
 # class WrappedImgFunc(object):
@@ -298,6 +299,19 @@ class TransformList(BaseTransform):
         repr_each_tfm = ",\n".join(["  " + repr(x) for x in self.tfms])
         return "imgaug.TransformList([\n{}])".format(repr_each_tfm)
 
+    def __add__(self, other):
+        other = other.tfms if isinstance(other, TransformList) else [other]
+        return TransformList(self.tfms + other)
+
+    def __iadd__(self, other):
+        other = other.tfms if isinstance(other, TransformList) else [other]
+        self.tfms.extend(other)
+        return self
+
+    def __radd__(self, other):
+        other = other.tfms if isinstance(other, TransformList) else [other]
+        return TransformList(other + self.tfms)
+
     __repr__ = __str__
 
 
@@ -361,7 +375,7 @@ if __name__ == '__main__':
     draw_points(orig_image, coords)
     print(coords)
 
-    for k in range(1):
+    for _ in range(1):
         coords = trans.apply_coords(coords)
         image = trans.apply_image(image)
     print(coords)

@@ -5,11 +5,10 @@
 import six
 from ..compat import tfv1 as tf
 
-from ..graph_builder import ModelDescBase
-from ..tfutils import get_default_sess_config
+from ..train.model_desc import ModelDescBase
 from ..tfutils.sessinit import JustCurrentSession, SessionInit
 from ..tfutils.sesscreate import NewSessionCreator
-from ..tfutils.tower import TowerFuncWrapper
+from ..tfutils.tower import TowerFunc
 from ..utils import logger
 
 __all__ = ['PredictConfig']
@@ -28,7 +27,6 @@ class PredictConfig(object):
                  session_init=None,
                  return_input=False,
                  create_graph=True,
-                 inputs_desc=None
                  ):
         """
         Users need to provide enough arguments to create a tower function,
@@ -36,7 +34,7 @@ class PredictConfig(object):
         This can be provided in the following ways:
 
         1. `model`: a :class:`ModelDesc` instance. It will contain a tower function by itself.
-        2. `tower_func`: a :class:`tfutils.TowerFuncWrapper` instance.
+        2. `tower_func`: a :class:`tfutils.TowerFunc` instance.
             Provide a tower function instance directly.
         3. `tower_func`: a symbolic function and `input_signature`: the signature of the function.
             Provide both a function and its signature.
@@ -52,8 +50,8 @@ class PredictConfig(object):
         Args:
             model (ModelDescBase): to be used to construct a tower function.
             tower_func: a callable which takes input tensors (by positional args) and construct a tower.
-                or a :class:`tfutils.TowerFuncWrapper` instance.
-            input_signature ([tf.TensorSpec]): if tower_func is a plain function (instead of a TowerFuncWrapper),
+                or a :class:`tfutils.TowerFunc` instance.
+            input_signature ([tf.TensorSpec]): if tower_func is a plain function (instead of a TowerFunc),
                 this describes the list of inputs it takes.
 
             input_names (list): a list of input tensor names. Defaults to match input_signature.
@@ -69,29 +67,23 @@ class PredictConfig(object):
             return_input (bool): same as in :attr:`PredictorBase.return_input`.
             create_graph (bool): create a new graph, or use the default graph
                 when predictor is first initialized.
-            inputs_desc (list[tf.TensorSpec]): old (deprecated) name for `input_signature`.
         """
         def assert_type(v, tp, name):
             assert isinstance(v, tp), \
                 "Argument '{}' has to be type '{}', but an object of type '{}' found.".format(
                     name, tp.__name__, v.__class__.__name__)
 
-        if inputs_desc is not None:
-            # TODO warn deprecated or not?
-            assert input_signature is None, "Cannot set both inputs_desc and input_signature!"
-            input_signature = inputs_desc
-
         if model is not None:
             assert_type(model, ModelDescBase, 'model')
             assert input_signature is None and tower_func is None
             self.input_signature = model.get_input_signature()
-            self.tower_func = TowerFuncWrapper(model.build_graph, self.input_signature)
+            self.tower_func = TowerFunc(model.build_graph, self.input_signature)
         else:
-            if isinstance(tower_func, TowerFuncWrapper):
+            if isinstance(tower_func, TowerFunc):
                 input_signature = tower_func.input_signature
             assert input_signature is not None and tower_func is not None
             self.input_signature = input_signature
-            self.tower_func = TowerFuncWrapper(tower_func, input_signature)
+            self.tower_func = TowerFunc(tower_func, input_signature)
 
         if session_init is None:
             session_init = JustCurrentSession()
@@ -99,7 +91,7 @@ class PredictConfig(object):
         assert_type(self.session_init, SessionInit, 'session_init')
 
         if session_creator is None:
-            self.session_creator = NewSessionCreator(config=get_default_sess_config())
+            self.session_creator = NewSessionCreator()
         else:
             self.session_creator = session_creator
 
@@ -119,8 +111,6 @@ class PredictConfig(object):
 
         self.return_input = bool(return_input)
         self.create_graph = bool(create_graph)
-
-        self.inputs_desc = input_signature  # TODO a little bit of compatibility
 
     def _maybe_create_graph(self):
         if self.create_graph:

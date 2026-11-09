@@ -2,7 +2,7 @@
 # File: interface.py
 
 from ..compat import tfv1
-from ..input_source import DummyConstantInput, FeedfreeInput, FeedInput, InputSource, QueueInput, StagingInput
+from ..input_source import FeedInput, InputSource, QueueInput, StagingInput
 from ..utils import logger
 from ..compat import is_tfv2
 from .config import TrainConfig
@@ -34,12 +34,10 @@ def apply_default_prefetch(input_source_or_dataflow, trainer):
         input = input_source_or_dataflow
     if hasattr(trainer, 'devices'):
         towers = trainer.devices
-        if len(towers) > 1:
-            # seem to only improve on >1 GPUs
+        if len(towers) > 1:  # seem to only help on >1 GPUs
             assert not isinstance(trainer, SimpleTrainer)
 
-            if isinstance(input, FeedfreeInput) and \
-               not isinstance(input, (StagingInput, DummyConstantInput)):
+            if isinstance(input, QueueInput):
                 logger.info("Automatically applying StagingInput on the DataFlow.")
                 input = StagingInput(input)
     return input
@@ -85,7 +83,7 @@ def launch_train_with_config(config, trainer):
 
     # This is the only place where the `ModelDesc` abstraction is useful.
     # We should gradually stay away from this unuseful abstraction.
-    # TowerFuncWrapper is a better abstraction (similar to tf.defun in the future)
+    # TowerFunc is a better abstraction (similar to tf.function in the future)
     trainer.setup_graph(
         model.get_input_signature(), input,
         model.build_graph, model.get_optimizer)

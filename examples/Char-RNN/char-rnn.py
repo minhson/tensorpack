@@ -9,9 +9,7 @@ import operator
 import os
 import sys
 from collections import Counter
-import six
 import tensorflow as tf
-from six.moves import range
 
 from tensorpack import *
 from tensorpack.tfutils import optimizer, summary
@@ -44,8 +42,6 @@ class CharRNNData(RNGDataFlow):
         # preprocess data
         with open(input_file, 'rb') as f:
             data = f.read()
-        if six.PY2:
-            data = bytearray(data)
         data = [chr(c) for c in data if c < 128]
         counter = Counter(data)
         char_cnt = sorted(counter.items(), key=operator.itemgetter(1), reverse=True)
@@ -141,7 +137,7 @@ def sample(path, start, length):
 
     pred = OfflinePredictor(PredictConfig(
         model=Model(),
-        session_init=SaverRestore(path),
+        session_init=SmartInit(path),
         input_names=['input', 'c0', 'h0', 'c1', 'h1'],
         output_names=['prob', 'last_state']))
 
@@ -159,7 +155,7 @@ def sample(path, start, length):
     # generate more
     ret = start
     c = start[-1]
-    for k in range(length):
+    for _ in range(length):
         x = np.array([[ds.char2idx[c]]], dtype='int32')
         prob, state = pred(x, state[0, 0], state[0, 1], state[1, 0], state[1, 1])
         c = ds.chars[pick(prob[0])]
@@ -193,6 +189,5 @@ if __name__ == '__main__':
     else:
         param.corpus = args.corpus
         config = get_config()
-        if args.load:
-            config.session_init = SaverRestore(args.load)
+        config.session_init = SmartInit(args.load)
         launch_train_with_config(config, SimpleTrainer())

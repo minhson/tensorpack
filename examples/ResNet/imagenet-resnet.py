@@ -9,29 +9,20 @@ from tensorpack import QueueInput, TFDatasetInput, logger
 from tensorpack.callbacks import *
 from tensorpack.dataflow import FakeData
 from tensorpack.models import *
-from tensorpack.tfutils import argscope, get_model_loader
+from tensorpack.tfutils import argscope, SmartInit
 from tensorpack.train import SyncMultiGPUTrainerReplicated, TrainConfig, launch_train_with_config
 from tensorpack.utils.gpu import get_num_gpu
 
 from imagenet_utils import ImageNetModel, eval_classification, get_imagenet_dataflow, get_imagenet_tfdata
-from resnet_model import (
-    preresnet_basicblock, preresnet_bottleneck, preresnet_group,
-    resnet_backbone, resnet_group,
-    resnet_basicblock, resnet_bottleneck, resnext_32x4d_bottleneck, se_resnet_bottleneck)
+import resnet_model
+from resnet_model import preact_group, resnet_backbone, resnet_group
 
 
 class Model(ImageNetModel):
     def __init__(self, depth, mode='resnet'):
-        if mode == 'se':
-            assert depth >= 50
-
         self.mode = mode
-        basicblock = preresnet_basicblock if mode == 'preact' else resnet_basicblock
-        bottleneck = {
-            'resnet': resnet_bottleneck,
-            'resnext32x4d': resnext_32x4d_bottleneck,
-            'preact': preresnet_bottleneck,
-            'se': se_resnet_bottleneck}[mode]
+        basicblock = getattr(resnet_model, mode + '_basicblock', None)
+        bottleneck = getattr(resnet_model, mode + '_bottleneck', None)
         self.num_blocks, self.block_func = {
             18: ([2, 2, 2, 2], basicblock),
             34: ([3, 4, 6, 3], basicblock),
@@ -39,12 +30,14 @@ class Model(ImageNetModel):
             101: ([3, 4, 23, 3], bottleneck),
             152: ([3, 8, 36, 3], bottleneck)
         }[depth]
+        assert self.block_func is not None, \
+            "(mode={}, depth={}) not implemented!".format(mode, depth)
 
     def get_logits(self, image):
         with argscope([Conv2D, MaxPooling, GlobalAvgPooling, BatchNorm], data_format=self.data_format):
             return resnet_backbone(
                 image, self.num_blocks,
-                preresnet_group if self.mode == 'preact' else resnet_group, self.block_func)
+                preact_group if self.mode == 'preact' else resnet_group, self.block_func)
 
 
 def get_config(model):
@@ -143,7 +136,7 @@ if __name__ == '__main__':
     if args.eval:
         batch = 128    # something that can run on one gpu
         ds = get_imagenet_dataflow(args.data, 'val', batch)
-        eval_classification(model, get_model_loader(args.load), ds)
+        eval_classification(model, SmartInit(args.load), ds)
     else:
         if args.fake:
             logger.set_logger_dir(os.path.join('train_log', 'tmp'), 'd')
@@ -154,7 +147,6 @@ if __name__ == '__main__':
                                  args.mode, args.depth, args.batch)))
 
         config = get_config(model)
-        if args.load:
-            config.session_init = get_model_loader(args.load)
+        config.session_init = SmartInit(args.load)
         trainer = SyncMultiGPUTrainerReplicated(max(get_num_gpu(), 1))
         launch_train_with_config(config, trainer)

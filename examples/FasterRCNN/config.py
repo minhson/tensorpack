@@ -43,6 +43,15 @@ class AttrDict():
         return {k: v.to_dict() if isinstance(v, AttrDict) else v
                 for k, v in self.__dict__.items() if not k.startswith('_')}
 
+    def from_dict(self, d):
+        self.freeze(False)
+        for k, v in d.items():
+            self_v = getattr(self, k)
+            if isinstance(self_v, AttrDict):
+                self_v.from_dict(v)
+            else:
+                setattr(self, k, v)
+
     def update_args(self, args):
         """Update from command line args. """
         for cfg in args:
@@ -50,7 +59,7 @@ class AttrDict():
             keylist = keys.split('.')
 
             dic = self
-            for i, k in enumerate(keylist[:-1]):
+            for k in keylist[:-1]:
                 assert k in dir(dic), "Unknown config key: {}".format(keys)
                 dic = getattr(dic, k)
             key = keylist[-1]
@@ -80,19 +89,25 @@ _C = config     # short alias to avoid coding
 # mode flags ---------------------
 _C.TRAINER = 'replicated'  # options: 'horovod', 'replicated'
 _C.MODE_MASK = True        # Faster R-CNN or Mask R-CNN
-_C.MODE_FPN = False
+_C.MODE_FPN = True
 
 # dataset -----------------------
 _C.DATA.BASEDIR = '/path/to/your/DATA/DIR'
+# All available dataset names are defined in `dataset/coco.py:register_coco`.
 # All TRAIN dataset will be concatenated for training.
-_C.DATA.TRAIN = ('coco_train2014', 'coco_valminusminival2014')   # i.e. trainval35k, AKA train2017
+_C.DATA.TRAIN = ('coco_train2017',)   # i.e. trainval35k
 # Each VAL dataset will be evaluated separately (instead of concatenated)
-_C.DATA.VAL = ('coco_minival2014', )  # AKA val2017
-# This two config will be populated later by the dataset loader:
-_C.DATA.NUM_CATEGORY = 80  # without the background class (e.g., 80 for COCO)
+_C.DATA.VAL = ('coco_val2017',)  # AKA minival2014
+
+# These two configs will be populated later inside `finalize_configs`.
+_C.DATA.NUM_CATEGORY = -1  # without the background class (e.g., 80 for COCO)
 _C.DATA.CLASS_NAMES = []  # NUM_CLASS (NUM_CATEGORY+1) strings, the first is "BG".
-# whether the coordinates in the annotations are absolute pixel values, or a relative value in [0, 1]
+
+# whether the coordinates in your registered dataset are
+# absolute pixel values in range [0, W or H] or relative values in [0, 1]
 _C.DATA.ABSOLUTE_COORD = True
+# Filter Negative Samples from dataset
+_C.DATA.FILTER_EMPTY_ANNOTATIONS = True
 # Number of data loading workers.
 # In case of horovod training, this is the number of workers per-GPU (so you may want to use a smaller number).
 # Set to 0 to disable parallel data loading
@@ -127,17 +142,20 @@ _C.TRAIN.NUM_GPUS = None         # by default, will be set from code
 _C.TRAIN.WEIGHT_DECAY = 1e-4
 _C.TRAIN.BASE_LR = 1e-2  # defined for total batch size=8. Otherwise it will be adjusted automatically
 _C.TRAIN.WARMUP = 1000   # in terms of iterations. This is not affected by #GPUs
-_C.TRAIN.WARMUP_INIT_LR = 1e-2 * 0.33  # defined for total batch size=8. Otherwise it will be adjusted automatically
+_C.TRAIN.WARMUP_INIT_LR = 1e-5  # defined for total batch size=8. Otherwise it will be adjusted automatically
 _C.TRAIN.STEPS_PER_EPOCH = 500
 _C.TRAIN.STARTING_EPOCH = 1  # the first epoch to start with, useful to continue a training
 
 # LR_SCHEDULE means equivalent steps when the total batch size is 8.
+# It can be either a string like "3x" that refers to standard convention, or a list of int.
+# LR_SCHEDULE=3x is the same as LR_SCHEDULE=[420000, 500000, 540000], which
+# means to decrease LR at steps 420k and 500k and stop training at 540k.
 # When the total bs!=8, the actual iterations to decrease learning rate, and
 # the base learning rate are computed from BASE_LR and LR_SCHEDULE.
 # Therefore, there is *no need* to modify the config if you only change the number of GPUs.
-
 _C.TRAIN.LR_SCHEDULE = "1x"      # "1x" schedule in detectron
-_C.TRAIN.EVAL_PERIOD = 25  # period (epochs) to run evaluation
+_C.TRAIN.EVAL_PERIOD = 50  # period (epochs) to run evaluation
+_C.TRAIN.CHECKPOINT_PERIOD = 20  # period (epochs) to save model
 
 # preprocessing --------------------
 # Alternative old (worse & faster) setting: 600
@@ -198,6 +216,7 @@ _C.FPN.MRCNN_HEAD_FUNC = 'maskrcnn_up4conv_head'   # choices: maskrcnn_up4conv_{
 
 # Mask R-CNN
 _C.MRCNN.HEAD_DIM = 256
+_C.MRCNN.ACCURATE_PASTE = True  # slightly more aligned results, but very slow on numpy
 
 # Cascade R-CNN, only available in FPN mode
 _C.FPN.CASCADE = False
@@ -225,6 +244,12 @@ def finalize_configs(is_training):
         _C.DATA.VAL = (_C.DATA.VAL, )
     if isinstance(_C.DATA.TRAIN, six.string_types):  # support single string
         _C.DATA.TRAIN = (_C.DATA.TRAIN, )
+
+    # finalize dataset definitions ...
+    from dataset import DatasetRegistry
+    datasets = list(_C.DATA.TRAIN) + list(_C.DATA.VAL)
+    _C.DATA.CLASS_NAMES = DatasetRegistry.get_metadata(datasets[0], "class_names")
+    _C.DATA.NUM_CATEGORY = len(_C.DATA.CLASS_NAMES) - 1
 
     assert _C.BACKBONE.NORM in ['FreezeBN', 'SyncBN', 'GN', 'None'], _C.BACKBONE.NORM
     if _C.BACKBONE.NORM != 'FreezeBN':
@@ -273,6 +298,8 @@ def finalize_configs(is_training):
         if _C.TRAINER == 'horovod':
             import horovod.tensorflow as hvd
             ngpu = hvd.size()
+            logger.info("Horovod Rank={}, Size={}, LocalRank={}".format(
+                hvd.rank(), hvd.size(), hvd.local_rank()))
         else:
             assert 'OMPI_COMM_WORLD_SIZE' not in os.environ
             ngpu = get_num_gpu()

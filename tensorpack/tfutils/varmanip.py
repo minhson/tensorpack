@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # File: varmanip.py
 
+import glob
+import operator
 import numpy as np
 import os
 import pprint
@@ -12,7 +14,9 @@ from ..utils import logger
 from .common import get_op_tensor_name
 
 __all__ = ['SessionUpdate', 'dump_session_params',
-           'load_chkpt_vars', 'save_chkpt_vars', 'get_checkpoint_path']
+           'load_chkpt_vars', 'save_chkpt_vars',
+           'load_checkpoint_vars', 'save_checkpoint_vars',
+           'get_checkpoint_path', 'get_all_checkpoints']
 
 
 def get_savename_from_varname(
@@ -38,17 +42,20 @@ def get_savename_from_varname(
 class SessionUpdate(object):
     """ Update the variables in a session """
 
-    def __init__(self, sess, vars_to_update):
+    def __init__(self, sess, vars_to_update, ignore_mismatch=False):
         """
         Args:
             sess (tf.Session): a session object
             vars_to_update: a collection of variables to update
+            ignore_mismatch (bool): ignore failures when the value and the
+                variable does not match.
         """
         self.sess = sess
         self.name_map = {v.name: v for v in vars_to_update}
+        self.ignore_mismatch = ignore_mismatch
 
     @staticmethod
-    def relaxed_value_for_var(value, var):
+    def relaxed_value_for_var(value, var, ignore_mismatch=False):
         """
         Returns a relaxed (possibly reshaped/upcast-ed) version of value,
         to be loaded to the given variable.
@@ -56,9 +63,13 @@ class SessionUpdate(object):
         Args:
             value (ndarray): an numpy array to be loaded to var
             var (tf.Variable):
+            ignore_mismatch (bool): ignore failures when the value and the
+                variable does not match.
 
         Returns:
-            ndarray: a possibly reshaped or casted version of value
+            ndarray: a possibly reshaped or casted version of value.
+            Returns None if `ignore_mismatch==True` and the value and the variable
+            mismatch.
         """
         assert isinstance(var, tf.Variable)
         name = var.op.name
@@ -66,11 +77,17 @@ class SessionUpdate(object):
         # check incompatible shape
         varshape = tuple(var.get_shape().as_list())
         if varshape != value.shape:
-            # TODO only allow reshape when shape different by empty axis
             if np.prod(varshape) != np.prod(value.shape):
-                raise ValueError(
-                    "Trying to load a tensor of shape {} into the variable '{}' whose shape is {}.".format(
-                        value.shape, name, varshape))
+                if ignore_mismatch:
+                    logger.warn(
+                        "Cannot load an array of shape {} into variable '{}' whose shape is {}.".format(
+                            value.shape, name, varshape))
+                    return None
+                else:
+                    raise ValueError(
+                        "Trying to load an array of shape {} into variable '{}' whose shape is {}.".format(
+                            value.shape, name, varshape))
+            # TODO only allow reshape when shape different by empty axis
             logger.warn("The tensor is reshaped from {} to {} when assigned to '{}'".format(
                 value.shape, varshape, name))
             value = value.reshape(varshape)
@@ -115,100 +132,131 @@ class SessionUpdate(object):
             for name, value in six.iteritems(prms):
                 assert name in self.name_map
                 var = self.name_map[name]
-                fetches.append(var.initializer)
+                value = SessionUpdate.relaxed_value_for_var(
+                    value, var, ignore_mismatch=self.ignore_mismatch)
                 # This is the implementation of `var.load`
-                feeds[var.initializer.inputs[1]] = SessionUpdate.relaxed_value_for_var(value, var)
+                if value is not None:
+                    fetches.append(var.initializer)
+                    feeds[var.initializer.inputs[1]] = value
             self.sess.run(fetches, feed_dict=feeds)
 
 
 def dump_session_params(path):
     """
     Dump value of all TRAINABLE + MODEL variables to a dict, and save as
-    npz format (loadable by :func:`sessinit.get_model_loader`).
+    npz format (loadable by :func:`sessinit.SmartInit`).
 
     Args:
         path(str): the file name to save the parameters. Must ends with npz.
     """
     # save variables that are GLOBAL, and either TRAINABLE or MODEL
-    var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-    var.extend(tf.get_collection(tf.GraphKeys.MODEL_VARIABLES))
+    var = tfv1.get_collection(tfv1.GraphKeys.TRAINABLE_VARIABLES)
+    var.extend(tfv1.get_collection(tfv1.GraphKeys.MODEL_VARIABLES))
     # TODO dedup
     assert len(set(var)) == len(var), "TRAINABLE and MODEL variables have duplication!"
-    gvars = set([k.name for k in tf.global_variables()])
+    gvars = {k.name for k in tfv1.global_variables()}
     var = [v for v in var if v.name in gvars]
     result = {}
     for v in var:
         result[v.name] = v.eval()
-    save_chkpt_vars(result, path)
+    save_checkpoint_vars(result, path)
 
 
-def save_chkpt_vars(dic, path):
+def save_checkpoint_vars(dic, path):
     """
     Save variables in dic to path.
 
     Args:
-        dic: {name: value}
+        dic: {name: value}. values have to be numpy arrays
         path: save as npz if the name ends with '.npz', otherwise save as a checkpoint.
     """
     logger.info("Variables to save to {}:".format(path))
-    keys = sorted(list(dic.keys()))
+    keys = sorted(dic.keys())
     logger.info(pprint.pformat(keys))
 
     assert not path.endswith('.npy')
     if path.endswith('.npz'):
         np.savez_compressed(path, **dic)
     else:
-        with tf.Graph().as_default(), \
-                tf.Session() as sess:
+        with tfv1.Graph().as_default(), \
+                tfv1.Session() as sess:
             for k, v in six.iteritems(dic):
                 k = get_op_tensor_name(k)[0]
-                _ = tf.Variable(name=k, initial_value=v)    # noqa
-            sess.run(tf.global_variables_initializer())
-            saver = tf.train.Saver()
+                _ = tfv1.Variable(name=k, initial_value=v)    # noqa
+            sess.run(tfv1.global_variables_initializer())
+            saver = tfv1.train.Saver()
             saver.save(sess, path, write_meta_graph=False)
 
 
-def get_checkpoint_path(model_path):
+def get_checkpoint_path(path):
     """
     Work around TF problems in checkpoint path handling.
 
     Args:
-        model_path: a user-input path
+        path: a user-input path
     Returns:
-        str: the argument that can be passed to NewCheckpointReader
+        str: the argument that can be passed to `tf.train.NewCheckpointReader`
     """
-    if os.path.basename(model_path) == model_path:
-        model_path = os.path.join('.', model_path)  # avoid #4921 and #6142
-    if os.path.basename(model_path) == 'checkpoint':
-        assert tfv1.gfile.Exists(model_path), model_path
-        model_path = tf.train.latest_checkpoint(os.path.dirname(model_path))
+    if os.path.basename(path) == path:
+        path = os.path.join('.', path)  # avoid #4921 and #6142
+    if os.path.basename(path) == 'checkpoint':
+        assert tfv1.gfile.Exists(path), path
+        path = tfv1.train.latest_checkpoint(os.path.dirname(path))
         # to be consistent with either v1 or v2
 
     # fix paths if provided a wrong one
-    new_path = model_path
-    if '00000-of-00001' in model_path:
-        new_path = model_path.split('.data')[0]
-    elif model_path.endswith('.index'):
-        new_path = model_path.split('.index')[0]
-    if new_path != model_path:
+    new_path = path
+    if '00000-of-00001' in path:
+        new_path = path.split('.data')[0]
+    elif path.endswith('.index'):
+        new_path = path.split('.index')[0]
+    if new_path != path:
         logger.info(
-            "Checkpoint path {} is auto-corrected to {}.".format(model_path, new_path))
-        model_path = new_path
-    assert tfv1.gfile.Exists(model_path) or tfv1.gfile.Exists(model_path + '.index'), model_path
-    return model_path
+            "Checkpoint path {} is auto-corrected to {}.".format(path, new_path))
+        path = new_path
+    assert tfv1.gfile.Exists(path) or tfv1.gfile.Exists(path + '.index'), path
+    return path
 
 
-def load_chkpt_vars(model_path):
+def get_all_checkpoints(dir: str, prefix: str = "model"):
+    """
+    Get a sorted list of all checkpoints found in directory.
+
+    Args:
+        dir (str): checkpoint directory
+        prefix (str): common prefix among all checkpoints (without the final "-")
+
+    Returns:
+        list[(str, int)]: list of (name, step) sorted by step.
+        Name is a checkpoint handle that can be passed to
+        `tf.train.NewCheckpointReader` or :func:`load_checkpoint_vars`.
+    """
+    def step_from_filename(name):
+        name = os.path.basename(name)
+        name = name[len("{}-".format(prefix)):-len(".index")]
+        return int(name)
+
+    checkpoints = glob.glob(os.path.join(dir, "model-*.index"))
+    checkpoints = [(f, step_from_filename(f)) for f in checkpoints]
+    checkpoints = sorted(checkpoints, key=operator.itemgetter(1))
+    return checkpoints
+
+
+def load_checkpoint_vars(path):
     """ Load all variables from a checkpoint to a dict.
 
     Args:
-        model_path(str): path to a checkpoint.
+        path(str): path to a checkpoint.
 
     Returns:
         dict: a name:value dict
     """
-    model_path = get_checkpoint_path(model_path)
-    reader = tfv1.train.NewCheckpointReader(model_path)
+    if path.endswith(".npz"):
+        ret = dict(np.load(path))
+        ret = {get_op_tensor_name(k)[0]: v for k, v in ret.items()}
+        return ret
+    path = get_checkpoint_path(path)
+    reader = tfv1.train.NewCheckpointReader(path)
     var_names = reader.get_variable_to_shape_map().keys()
     result = {}
     for n in var_names:
@@ -241,3 +289,7 @@ def is_training_name(name):
     if name.startswith('apply_gradients'):
         return True
     return False
+
+
+load_chkpt_vars = load_checkpoint_vars
+save_chkpt_vars = save_checkpoint_vars

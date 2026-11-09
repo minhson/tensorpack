@@ -17,7 +17,7 @@ from GAN import GANModelDesc, GANTrainer
 Boundary Equilibrium GAN.
 See the docstring in DCGAN.py for usage.
 
-A pretrained model on CelebA is at http://models.tensorpack.com/GAN/
+A pretrained model on CelebA is at http://models.tensorpack.com/#GAN
 """
 
 
@@ -146,5 +146,5 @@ if __name__ == '__main__':
                 StatMonitorParamSetter(
                     'learning_rate', 'losses/measure', lambda x: x * 0.5, 0, 10)
             ],
-            session_init=SaverRestore(args.load) if args.load else None,
+            session_init=SmartInit(args.load),
             steps_per_epoch=500, max_epoch=400)

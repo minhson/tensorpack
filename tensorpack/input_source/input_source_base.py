@@ -6,15 +6,54 @@ from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager
 import six
 import tensorflow as tf
-from six.moves import zip
 
 from ..callbacks.base import CallbackFactory
 from ..tfutils.common import get_op_tensor_name
 from ..utils import logger
 from ..utils.argtools import call_only_once, memoized_method
-from ..graph_builder.model_desc import build_or_reuse_placeholder
+from ..compat import tfv1
 
 __all__ = ['InputSource', 'remap_input_source']
+
+
+def build_or_reuse_placeholder(tensor_spec):
+    """
+    Build a tf.placeholder from the metadata in the given tensor spec, or return an existing one.
+
+    Args:
+        tensor_spec (tf.TensorSpec):
+
+    Returns:
+        tf.Tensor:
+    """
+    g = tfv1.get_default_graph()
+    name = tensor_spec.name
+    try:
+        tensor = g.get_tensor_by_name(name + ':0')
+        assert "Placeholder" in tensor.op.type, "Tensor {} exists but is not a placeholder!".format(name)
+        assert tensor_spec.is_compatible_with(tensor), \
+            "Tensor {} exists but is not compatible with the signature!".format(tensor)
+
+        # It might be desirable to use a placeholder of a different shape in some tower
+        # (e.g., a less specific shape)
+        try:
+            if tensor.shape.as_list() == tensor_spec.shape.as_list():
+                # Comparing `tensor.shape` directly doesn't work in older versions of tensorflow,
+                # because tensorflow thinks `tf.Dimension(None)` and `tf.Dimension(None)` are not
+                # equal. Newer versions of tensorflow, e.g. 2.3, do not support as_list() for
+                # `tf.Dimension(None)` and raise a `ValueError`
+                return tensor
+        except ValueError:
+            if tensor.shape == tensor_spec.shape:
+                # With the newer version of tensorflow, comparing `tensor.shape` directly seems
+                # to work fine.
+                return tensor
+    except KeyError:
+        pass
+    with tfv1.name_scope(None):   # clear any name scope it might get called in
+        ret = tfv1.placeholder(
+            tensor_spec.dtype, shape=tensor_spec.shape, name=tensor_spec.name)
+    return ret
 
 
 def get_tensors_inputs(placeholders, tensors, names):
@@ -212,30 +251,33 @@ def remap_input_source(input, names):
     except that the corresponding ones are replaced with the tensor produced
     by the given :class:`InputSource`.
 
-    Args:
-        input(InputSource): a :class:`InputSource`, whose tensors will get mapped.
-        names(list[str]): list of input names corresponding to the tensors
-            produced by ``input``.
-
-    Returns:
-        InputSource:
-
     Example:
 
     .. code-block:: python
 
         input1 = QueueInput(ds)
-        # assume ds produces 'image' and 'label', but the graph takes more
-        # inputs for some reasons, or takes inputs of a different order:
-        input_signature = [tf.TensorSpec((None,10), tf.float32, 'score'),
-                           tf.TensorSpec((None,20,20,3), tf.float32, 'label'),
-                           tf.TensorSpec((None,), tf.int32, 'image') ]
+        # assume ds produces data that should be fed to 'image' and 'label',
+        # but the graph takes more inputs for some reasons, or takes inputs
+        # of a different order, for example like the following:
+
+        # input_signature = [tf.TensorSpec((None,10), tf.float32, 'score'),
+        #                    tf.TensorSpec((None,20,20,3), tf.float32, 'label'),
+        #                    tf.TensorSpec((None,), tf.int32, 'image') ]
+
         input2 = remap_input_source(input1, ['image', 'label'])
-        input2.setup(input_signature)
-        # now, input2.get_input_tensors() will return a placeholder for 'score',
-        # plus the tensors returned by input1.get_input_tensors()
+        # now, if input2 is used with the above input_signature, it will return a
+        # placeholder for 'score', plus the tensors returned by input1
     """
     def __init__(self, input, names):
+        """
+        Args:
+            input(InputSource): a :class:`InputSource`, whose tensors will get mapped.
+            names(list[str]): list of input names corresponding to the tensors
+                produced by ``input``.
+
+        Returns:
+            InputSource:
+        """
         ProxyInputSource.__init__(self, input)
         assert isinstance(names, (list, tuple)), names
         self._names = tuple(names)

@@ -8,11 +8,11 @@ import numpy as np
 import cv2
 import tensorflow as tf
 from scipy.signal import convolve2d
-from six.moves import range, zip
 
 from tensorpack import *
 from tensorpack.dataflow import dataset
 from tensorpack.utils import logger
+from tensorpack.utils.gpu import change_gpu
 from tensorpack.utils.argtools import shape2d, shape4d
 from tensorpack.utils.viz import *
 
@@ -211,7 +211,7 @@ class ThetaImages(ProxyDataFlow, RNGDataFlow):
         RNGDataFlow.reset_state(self)
 
     def __iter__(self):
-        for image, label in self.ds:
+        for image, _ in self.ds:
             theta = self.rng.uniform(0, 2 * np.pi)
             filtered_image, gt_filter = ThetaImages.filter_with_theta(image, theta)
             yield [theta, image, filtered_image, gt_filter]
@@ -255,6 +255,5 @@ if __name__ == '__main__':
     with change_gpu(args.gpu):
         NGPU = len(args.gpu.split(','))
         config = get_config()
-        if args.load:
-            config.session_init = SaverRestore(args.load)
+        config.session_init = SmartInit(args.load)
         launch_train_with_config(config, SyncMultiGPUTrainer(NGPU))

@@ -4,17 +4,13 @@
 
 import traceback
 from contextlib import contextmanager
-from time import time as timer
-import six
+from time import perf_counter as timer  # noqa
 from ..compat import tfv1 as tf
 
 from ..utils import logger
 from ..utils.utils import humanize_time_delta
 from .base import Callback
 from .hooks import CallbackToHook
-
-if six.PY3:
-    from time import perf_counter as timer  # noqa
 
 __all__ = ['Callbacks']
 
@@ -37,7 +33,7 @@ class CallbackTimeLogger(object):
     def log(self):
 
         """ log the time of some heavy callbacks """
-        if self.tot < 3:
+        if self.tot < 2:
             return
         msgs = []
         for name, t in self.times:
